@@ -130,13 +130,13 @@ func TestSupportingDocumentsAreAnonymousAndRequireHTTPS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.supportingJSON(context.Background(), "https://schema.example/value", "test", "application/json", []string{"application/json"}, 1024, 0); err != nil {
+	if _, err := client.supportingJSON(context.Background(), "https://schema.example/value", "test", "application/json", []string{"application/json"}, 1024, maximumResourceDepth, 0); err != nil {
 		t.Fatal(err)
 	}
 	if authorization != "" {
 		t.Fatalf("supporting Authorization = %q", authorization)
 	}
-	if _, err := client.supportingJSON(context.Background(), "http://schema.example/value", "test", "application/json", []string{"application/json"}, 1024, 0); err == nil {
+	if _, err := client.supportingJSON(context.Background(), "http://schema.example/value", "test", "application/json", []string{"application/json"}, 1024, maximumResourceDepth, 0); err == nil {
 		t.Fatal("HTTP supporting URL accepted")
 	}
 }

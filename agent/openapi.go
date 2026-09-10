@@ -10,10 +10,16 @@ import (
 	"github.com/pb33f/libopenapi"
 )
 
+const (
+	maximumOpenAPIBytes = 1_048_576
+	// An OpenAPI Action document nests more deeply than an ODP document, so it carries its own bound.
+	maximumOpenAPIDepth = 32
+)
+
 var openAPIVersion = regexp.MustCompile(`^3\.1\.\d+(?:[-+].*)?$`)
 
 func (client *ServiceClient) resolveOpenAPI(ctx context.Context, target, operationID string) (map[string]any, map[string]any, error) {
-	document, err := client.supportingJSON(ctx, target, "openapi", "application/vnd.oai.openapi+json;version=3.1, application/json;q=0.9", []string{"application/vnd.oai.openapi+json", "application/json"}, 1_048_576, 0)
+	document, err := client.supportingJSON(ctx, target, "openapi", "application/vnd.oai.openapi+json;version=3.1, application/json;q=0.9", []string{"application/vnd.oai.openapi+json", "application/json"}, maximumOpenAPIBytes, maximumOpenAPIDepth, 0)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 
 	odp "github.com/offering-protocol/odp-go"
+	"github.com/offering-protocol/odp-go/internal/jsonvalue"
 )
 
 const (
@@ -62,7 +62,9 @@ func (client *ServiceClient) resolveSearchCapabilities(ctx context.Context, coll
 		client.addFilters(ctx, &result, source.scope, source.capabilities.Filters)
 		client.addSorts(ctx, &result, sorts, sortScopes, source.scope, source.capabilities.Sorts)
 	}
-	for id, sort := range sorts {
+	// A Go map iterates in an unspecified order, and the issues below reach the caller.
+	for _, id := range sortedKeys(sorts) {
+		sort := sorts[id]
 		resolved := ResolvedSortDefinition{SortDefinition: sort}
 		missing := false
 		for _, key := range sort.Keys {
@@ -95,34 +97,44 @@ func (client *ServiceClient) addFilters(ctx context.Context, result *SearchCapab
 	}
 	values := append([]odp.FilterDefinition(nil), source.Inline...)
 	if source.Linked != nil {
-		pages, err := client.loadFilterPages(ctx, source.Linked.Href)
+		loaded, err := client.loadFilterPages(ctx, source.Linked.Href, maximumFilters-len(result.Filters))
 		if err != nil {
 			result.Issues = append(result.Issues, CapabilityIssue{Kind: CapabilityKindFilters, Message: err.Error(), Scope: scope})
 			return
 		}
-		values = pages
+		values = loaded
 	}
-	duplicates := duplicateFilterIDs(values, result.Filters)
-	for id := range duplicates {
-		delete(result.Filters, id)
+	identifiers := make([]string, len(values))
+	for index, value := range values {
+		identifiers[index] = value.ID
 	}
-	accepted := 0
-	for _, value := range values {
-		if !duplicates[value.ID] {
-			accepted++
-		}
+	// FLT-55: a source is atomic. One that repeats an identifier within itself is not usable at
+	// all, so nothing from it is exposed — unlike a clash between two sources, handled below.
+	if repeated, found := firstRepeated(identifiers); found {
+		result.Issues = append(result.Issues, CapabilityIssue{Kind: CapabilityKindFilters, Message: "Source repeats filter " + repeated + ".", Scope: scope})
+		return
 	}
-	if len(result.Filters)+accepted > maximumFilters {
+	if len(result.Filters)+len(values) > maximumFilters {
 		result.Issues = append(result.Issues, CapabilityIssue{Kind: CapabilityKindFilters, Message: "Effective filters exceed their limit.", Scope: scope})
 		return
 	}
+	// FLT-65: an identifier two sources both publish is quarantined on both sides.
+	conflicts := map[string]bool{}
 	for _, value := range values {
-		if !duplicates[value.ID] {
+		if _, found := result.Filters[value.ID]; found {
+			conflicts[value.ID] = true
+		}
+	}
+	for id := range conflicts {
+		delete(result.Filters, id)
+	}
+	for _, value := range values {
+		if !conflicts[value.ID] {
 			result.Filters[value.ID] = value
 		}
 	}
-	if len(duplicates) != 0 {
-		result.Issues = append(result.Issues, CapabilityIssue{Kind: CapabilityKindFilters, Message: "Duplicate filters: " + duplicateNames(duplicates), Scope: scope})
+	if len(conflicts) != 0 {
+		result.Issues = append(result.Issues, CapabilityIssue{Kind: CapabilityKindFilters, Message: "Duplicate filters: " + duplicateNames(conflicts), Scope: scope})
 	}
 }
 
@@ -132,37 +144,65 @@ func (client *ServiceClient) addSorts(ctx context.Context, result *SearchCapabil
 	}
 	values := append([]odp.SortDefinition(nil), source.Inline...)
 	if source.Linked != nil {
-		pages, err := client.loadSortPages(ctx, source.Linked.Href)
+		loaded, err := client.loadSortPages(ctx, source.Linked.Href, maximumSorts-len(target))
 		if err != nil {
 			result.Issues = append(result.Issues, CapabilityIssue{Kind: CapabilityKindSorts, Message: err.Error(), Scope: scope})
 			return
 		}
-		values = pages
+		values = loaded
 	}
-	duplicates := duplicateSortIDs(values, target)
-	for id := range duplicates {
-		delete(target, id)
-		delete(scopes, id)
+	identifiers := make([]string, len(values))
+	for index, value := range values {
+		identifiers[index] = value.ID
 	}
-	accepted := 0
-	for _, value := range values {
-		if !duplicates[value.ID] {
-			accepted++
-		}
+	// FLT-55: a source that repeats an identifier within itself is discarded whole.
+	if repeated, found := firstRepeated(identifiers); found {
+		result.Issues = append(result.Issues, CapabilityIssue{Kind: CapabilityKindSorts, Message: "Source repeats sort " + repeated + ".", Scope: scope})
+		return
 	}
-	if len(target)+accepted > maximumSorts {
+	if len(target)+len(values) > maximumSorts {
 		result.Issues = append(result.Issues, CapabilityIssue{Kind: CapabilityKindSorts, Message: "Effective sorts exceed their limit.", Scope: scope})
 		return
 	}
+	conflicts := map[string]bool{}
 	for _, value := range values {
-		if !duplicates[value.ID] {
+		if _, found := target[value.ID]; found {
+			conflicts[value.ID] = true
+		}
+	}
+	for id := range conflicts {
+		delete(target, id)
+		delete(scopes, id)
+	}
+	for _, value := range values {
+		if !conflicts[value.ID] {
 			target[value.ID] = value
 			scopes[value.ID] = scope
 		}
 	}
-	if len(duplicates) != 0 {
-		result.Issues = append(result.Issues, CapabilityIssue{Kind: CapabilityKindSorts, Message: "Duplicate sorts: " + duplicateNames(duplicates), Scope: scope})
+	if len(conflicts) != 0 {
+		result.Issues = append(result.Issues, CapabilityIssue{Kind: CapabilityKindSorts, Message: "Duplicate sorts: " + duplicateNames(conflicts), Scope: scope})
 	}
+}
+
+func firstRepeated(identifiers []string) (string, bool) {
+	seen := make(map[string]bool, len(identifiers))
+	for _, id := range identifiers {
+		if seen[id] {
+			return id, true
+		}
+		seen[id] = true
+	}
+	return "", false
+}
+
+func sortedKeys[Value any](values map[string]Value) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 func duplicateNames(duplicates map[string]bool) string {
@@ -174,31 +214,7 @@ func duplicateNames(duplicates map[string]bool) string {
 	return strings.Join(ids, ", ")
 }
 
-func duplicateFilterIDs(values []odp.FilterDefinition, existing map[string]odp.FilterDefinition) map[string]bool {
-	seen := map[string]bool{}
-	duplicates := map[string]bool{}
-	for _, value := range values {
-		if seen[value.ID] || existing[value.ID].ID != "" {
-			duplicates[value.ID] = true
-		}
-		seen[value.ID] = true
-	}
-	return duplicates
-}
-
-func duplicateSortIDs(values []odp.SortDefinition, existing map[string]odp.SortDefinition) map[string]bool {
-	seen := map[string]bool{}
-	duplicates := map[string]bool{}
-	for _, value := range values {
-		if seen[value.ID] || existing[value.ID].ID != "" {
-			duplicates[value.ID] = true
-		}
-		seen[value.ID] = true
-	}
-	return duplicates
-}
-
-func (client *ServiceClient) loadFilterPages(ctx context.Context, reference string) ([]odp.FilterDefinition, error) {
+func (client *ServiceClient) loadFilterPages(ctx context.Context, reference string, budget int) ([]odp.FilterDefinition, error) {
 	values := []odp.FilterDefinition{}
 	err := client.loadCapabilityPages(ctx, reference, func(data []byte) (string, error) {
 		filtered, err := odp.NormalizeAgentResponse(data, "filter-page")
@@ -206,15 +222,20 @@ func (client *ServiceClient) loadFilterPages(ctx context.Context, reference stri
 			return "", err
 		}
 		page, err := odp.ParseFilterDefinitionPage(filtered)
-		if err == nil {
-			values = append(values, page.Items...)
+		if err != nil {
+			return "", err
 		}
-		return page.Next, err
+		values = append(values, page.Items...)
+		// FLT-58: once a source cannot fit the effective bound, stop retrieving it.
+		if len(values) > budget {
+			return "", errors.New("ODP linked filter source exceeds the effective filter limit")
+		}
+		return page.Next, nil
 	})
 	return values, err
 }
 
-func (client *ServiceClient) loadSortPages(ctx context.Context, reference string) ([]odp.SortDefinition, error) {
+func (client *ServiceClient) loadSortPages(ctx context.Context, reference string, budget int) ([]odp.SortDefinition, error) {
 	values := []odp.SortDefinition{}
 	err := client.loadCapabilityPages(ctx, reference, func(data []byte) (string, error) {
 		filtered, err := odp.NormalizeAgentResponse(data, "sort-page")
@@ -222,27 +243,41 @@ func (client *ServiceClient) loadSortPages(ctx context.Context, reference string
 			return "", err
 		}
 		page, err := odp.ParseSortDefinitionPage(filtered)
-		if err == nil {
-			values = append(values, page.Items...)
+		if err != nil {
+			return "", err
 		}
-		return page.Next, err
+		values = append(values, page.Items...)
+		// FLT-58: once a source cannot fit the effective bound, stop retrieving it.
+		if len(values) > budget {
+			return "", errors.New("ODP linked sort source exceeds the effective sort limit")
+		}
+		return page.Next, nil
 	})
 	return values, err
 }
 
 func (client *ServiceClient) loadCapabilityPages(ctx context.Context, reference string, parse func([]byte) (string, error)) error {
+	validate := func(data []byte) error {
+		if jsonvalue.Depth(data) > maximumResourceDepth {
+			return fmt.Errorf("%w: ODP response exceeds its nesting-depth limit", ErrResponseLimitExceeded)
+		}
+		return nil
+	}
 	visited := map[string]bool{}
 	next := reference
 	for page := 0; next != "" && page < maximumCapabilityPages; page++ {
-		target, err := resolveReference(next, client.serviceOrigin)
+		// A capability source is a Resource Reference on the Service origin, and the request that
+		// retrieves it carries this client's credentials, so it must not be walked off-origin.
+		target, err := odp.ResolveContinuation(next, client.serviceOrigin)
 		if err != nil {
 			return err
 		}
-		if visited[target] {
+		address := target.String()
+		if visited[address] {
 			return errors.New("ODP capability pagination loop detected")
 		}
-		visited[target] = true
-		result, err := request(ctx, client.client, http.MethodGet, target, nil, client.acceptLanguage, client.maxRedirects, maximumResourceBytes, client.resourceCache, cacheKey(client.partition, http.MethodGet, target, client.acceptLanguage, nil), CollectionFallback, nil)
+		visited[address] = true
+		result, err := request(ctx, client.client, http.MethodGet, address, nil, client.acceptLanguage, client.maxRedirects, maximumResourceBytes, client.requestCache, cacheKey(client.partition, http.MethodGet, address, client.acceptLanguage, nil), client.fallbacks.CapabilityDefinition, validate)
 		if err != nil {
 			return err
 		}
@@ -252,22 +287,7 @@ func (client *ServiceClient) loadCapabilityPages(ctx context.Context, reference 
 		}
 	}
 	if next != "" {
-		return errors.New("ODP capability source exceeded 16 pages")
+		return fmt.Errorf("ODP capability source exceeded %d pages", maximumCapabilityPages)
 	}
 	return nil
-}
-
-func resolveReference(reference, origin string) (string, error) {
-	base, err := url.Parse(origin)
-	if err != nil {
-		return "", err
-	}
-	target, err := base.Parse(reference)
-	if err != nil {
-		return "", err
-	}
-	if target.Scheme != "https" && target.Scheme != "http" {
-		return "", errors.New("ODP reference must use HTTP or HTTPS")
-	}
-	return target.String(), nil
 }

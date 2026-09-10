@@ -150,14 +150,22 @@ func TestSearchPagesFiltersUnknownProtocols(t *testing.T) {
 	}
 }
 
-func TestSearchPagesRejectsMalformedKnownProtocol(t *testing.T) {
+func TestSearchPagesReportsMalformedKnownProtocol(t *testing.T) {
 	result := strings.Replace(serviceResult, `"name":"mpp","options"`, `"name":"mpp","unexpected":true,"options"`, 1)
 	transport := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-		return response(http.StatusOK, `{"items":[`+result+`]}`, nil), nil
+		return response(http.StatusOK, `{"items":[`+result+`,`+serviceResult+`]}`, nil), nil
 	})
-	_, err := first(client(t, transport, directory.Production).SearchPages(t.Context(), directory.SearchRequest{}, directory.IterationOptions{}))
-	if err == nil {
-		t.Fatal("Directory accepted a malformed recognized protocol descriptor")
+	page, err := first(client(t, transport, directory.Production).SearchPages(t.Context(), directory.SearchRequest{}, directory.IterationOptions{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A directory is not an ODP protocol role, so one unusable record is reported alongside the
+	// records that were usable rather than discarding the page they arrived in.
+	if len(page.Items) != 1 || len(page.Issues) != 1 {
+		t.Fatalf("page = %#v", page)
+	}
+	if page.Issues[0].Index != 0 || page.Issues[0].Scope != directory.IssueService || page.Issues[0].Message == "" {
+		t.Fatalf("issue = %#v", page.Issues[0])
 	}
 }
 
@@ -198,7 +206,7 @@ func TestSuggestServicesUsesSelectedEnvironment(t *testing.T) {
 	if strings.Join(values, ",") != "gpu,gpu compute" {
 		t.Fatalf("suggestions = %v", values)
 	}
-	if target != "https://sandbox.inflowpay.ai/v1/services/suggestions?prefix=gp&limit=5" {
+	if target != "https://sandbox.inflowpay.ai/v1/services/suggestions?limit=5&prefix=gp" {
 		t.Fatalf("target = %q", target)
 	}
 }
@@ -234,16 +242,21 @@ func TestSearchRejectsCrossOriginContinuation(t *testing.T) {
 func TestRequestErrorPreservesResponseDetails(t *testing.T) {
 	headers := make(http.Header)
 	headers.Set("Retry-After", "30")
+	headers.Set("Content-Type", "application/problem+json")
 	transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return response(http.StatusServiceUnavailable, "Unavailable", headers), nil
+		return response(http.StatusServiceUnavailable, `{"title":"Unavailable","detail":"try again shortly"}`, headers), nil
 	})
 	_, err := first(client(t, transport, directory.Production).SearchPages(t.Context(), directory.SearchRequest{}, directory.IterationOptions{}))
 	var requestError *directory.RequestError
 	if !errors.As(err, &requestError) {
 		t.Fatalf("error = %v", err)
 	}
-	if requestError.Status != http.StatusServiceUnavailable || requestError.Message != "Unavailable" || requestError.Header.Get("Retry-After") != "30" {
+	if requestError.Status != http.StatusServiceUnavailable || requestError.Header.Get("Retry-After") != "30" || !requestError.Retryable {
 		t.Fatalf("request error = %#v", requestError)
+	}
+	// The message names the status and quotes only a structured field of the error document.
+	if requestError.Message != "Directory request failed with HTTP 503: try again shortly" {
+		t.Fatalf("message = %q", requestError.Message)
 	}
 }
 
@@ -316,7 +329,7 @@ func TestSearchValidation(t *testing.T) {
 		{name: "unsupported trust", request: directory.SearchRequest{Filters: &directory.ServiceFilters{Trust: []odp.TrustProtocol{{Name: "future-trust"}}}}},
 		{name: "limit", request: directory.SearchRequest{Limit: 101}},
 		{name: "max items", options: directory.IterationOptions{MaxItems: 10_001}},
-		{name: "max pages", options: directory.IterationOptions{MaxPages: 17}},
+		{name: "max pages", options: directory.IterationOptions{MaxPages: 10_001}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

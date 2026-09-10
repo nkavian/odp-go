@@ -24,7 +24,7 @@ func newService(t *testing.T, catalog service.Catalog) *service.Service {
 			DocumentationURL: "/developers/",
 			HTTP:             odp.HTTPConfiguration{EndpointBase: "/odp"},
 			Language:         "en",
-			Localizations:    []string{"en"},
+			Localizations:    []string{"en", "fr"},
 			MCP:              []odp.MCPEndpoint{{Name: "Catalog", Type: odp.MCPEndpointStreamableHTTP, URL: "/mcp"}},
 			Name:             "Example",
 			StatusURL:        "https://status.example.com/",
@@ -211,7 +211,14 @@ func TestStaticCatalogContinuation(t *testing.T) {
 	if item["id"] != "storage" {
 		t.Fatalf("second page id = %v", item["id"])
 	}
-	changedLanguage := request(t, runtime, http.MethodGet, "https://service.example"+next, nil, map[string]string{"Accept-Language": "ja"})
+	// A language the Service does not advertise selects the same representation the cursor was
+	// issued for, so the continuation still resolves; one it does advertise is a different
+	// representation, and the cursor no longer describes it.
+	unknownLanguage := request(t, runtime, http.MethodGet, "https://service.example"+next, nil, map[string]string{"Accept-Language": "ja"})
+	if unknownLanguage.Code != http.StatusOK {
+		t.Fatalf("unknown-language continuation status = %d", unknownLanguage.Code)
+	}
+	changedLanguage := request(t, runtime, http.MethodGet, "https://service.example"+next, nil, map[string]string{"Accept-Language": "fr"})
 	if changedLanguage.Code != http.StatusBadRequest {
 		t.Fatalf("changed-language continuation status = %d", changedLanguage.Code)
 	}
@@ -297,7 +304,7 @@ func TestNegotiationAndProblemDetails(t *testing.T) {
 		t.Fatalf("unacceptable status = %d", unacceptable.Code)
 	}
 	method := request(t, runtime, http.MethodPost, "https://service.example/odp/offerings", nil, nil)
-	if method.Code != http.StatusMethodNotAllowed || method.Header().Get("Allow") != http.MethodGet {
+	if method.Code != http.StatusMethodNotAllowed || method.Header().Get("Allow") != "GET, HEAD" {
 		t.Fatalf("method response = %d, Allow %q", method.Code, method.Header().Get("Allow"))
 	}
 	problem := decodeObject(t, method)

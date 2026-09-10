@@ -12,17 +12,33 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	odp "github.com/offering-protocol/odp-go"
+	"github.com/offering-protocol/odp-go/internal/jsonvalue"
 )
 
-func (client *ServiceClient) supportingJSON(ctx context.Context, target, resourceClass, accept string, mediaTypes []string, maximumBytes int64, fallback time.Duration) (map[string]any, error) {
+func (client *ServiceClient) supportingJSON(ctx context.Context, target, resourceClass, accept string, mediaTypes []string, maximumBytes int64, maximumDepth int, fallback time.Duration) (map[string]any, error) {
 	current, err := url.Parse(target)
 	if err != nil || current.Scheme != "https" || current.Host == "" {
 		return nil, errors.New("ODP supporting document URL must use HTTPS")
+	}
+	origin, err := odp.DeriveServiceOrigin(current.String())
+	if err != nil {
+		return nil, err
 	}
 	key := cacheKey("anonymous:"+resourceClass+":"+accept, http.MethodGet, target, "", nil)
 	record, cached, err := cachedRecord(ctx, client.supportingCache, key)
 	if err != nil {
 		return nil, err
+	}
+	// An entry whose stored representation came from another origin is not this document.
+	if cached && record.FinalURL != "" {
+		storedOrigin, storedErr := odp.DeriveServiceOrigin(record.FinalURL)
+		if storedErr != nil || storedOrigin != origin {
+			_ = client.supportingCache.Delete(ctx, key)
+			cached = false
+			record = CacheRecord{}
+		}
 	}
 	if cached && time.Now().Before(record.ExpiresAt) {
 		document, decodeErr := decodeSupportingJSON(record.Body)
@@ -58,11 +74,27 @@ func (client *ServiceClient) supportingJSON(ctx context.Context, target, resourc
 			if parseErr != nil || next.Scheme != "https" || next.Host == "" {
 				return nil, errors.New("ODP supporting document redirect must use HTTPS")
 			}
+			// A redirect for a supporting document keeps the scheme, host and port it started on,
+			// so a schema or OpenAPI URL cannot be pointed at another origin after the fact.
+			nextOrigin, originErr := odp.DeriveServiceOrigin(next.String())
+			if originErr != nil || nextOrigin != origin {
+				return nil, errors.New("ODP supporting document redirect changed origin")
+			}
 			current = next
 			continue
 		}
 		if response.StatusCode == http.StatusNotModified && cached {
 			_ = response.Body.Close()
+			if echoed := response.Header.Get("ETag"); echoed != "" && echoed != record.ETag {
+				_ = client.supportingCache.Delete(ctx, key)
+				return nil, errors.New("ODP supporting document 304 confirmed a validator the cache does not hold")
+			}
+			if !supportedVary(response.Header.Values("Vary")) {
+				if err := client.supportingCache.Delete(ctx, key); err != nil {
+					return nil, err
+				}
+				return decodeSupportingJSON(record.Body)
+			}
 			if _, noStore := cacheDirectives(response.Header.Get("Cache-Control"))["no-store"]; noStore {
 				if err := client.supportingCache.Delete(ctx, key); err != nil {
 					return nil, err
@@ -73,12 +105,22 @@ func (client *ServiceClient) supportingJSON(ctx context.Context, target, resourc
 			if hasFreshnessDirective(response.Header) {
 				record.ExpiresAt = expiry(response.Header, fallback, now)
 			} else {
-				lifetime := record.ExpiresAt.Sub(record.StoredAt)
+				lifetime := time.Duration(0)
+				if !record.StoredAt.IsZero() {
+					lifetime = record.ExpiresAt.Sub(record.StoredAt)
+				}
 				if lifetime < 0 {
 					lifetime = 0
 				}
 				record.ExpiresAt = now.Add(lifetime)
 			}
+			if value := response.Header.Get("ETag"); value != "" {
+				record.ETag = value
+			}
+			if value := response.Header.Get("Last-Modified"); value != "" {
+				record.LastModified = value
+			}
+			record.FinalURL = current.String()
 			record.StoredAt = now
 			if err := client.supportingCache.Set(ctx, key, record); err != nil {
 				return nil, err
@@ -100,7 +142,10 @@ func (client *ServiceClient) supportingJSON(ctx context.Context, target, resourc
 			return nil, readErr
 		}
 		if int64(len(body)) > maximumBytes {
-			return nil, errors.New("ODP supporting document exceeds its byte limit")
+			return nil, fmt.Errorf("%w: ODP supporting document exceeds its byte limit", ErrResponseLimitExceeded)
+		}
+		if jsonvalue.Depth(body) > maximumDepth {
+			return nil, fmt.Errorf("%w: ODP supporting document exceeds its nesting-depth limit", ErrResponseLimitExceeded)
 		}
 		document, err := decodeSupportingJSON(body)
 		if err != nil {

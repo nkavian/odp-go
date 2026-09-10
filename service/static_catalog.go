@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -24,7 +25,11 @@ const (
 
 type StaticCatalogOptions struct {
 	Collections []odp.Collection
-	Offerings   []odp.Offering
+	// ContinuationKey signs this catalog's continuations. Supply one, of at least 32 bytes, so that
+	// a cursor issued by one process stays usable by another and survives a restart. Without it a
+	// key is generated here, and outstanding cursors end with the process that issued them.
+	ContinuationKey []byte
+	Offerings       []odp.Offering
 }
 
 type staticContinuation struct {
@@ -73,8 +78,15 @@ func NewStaticCatalog(options StaticCatalogOptions) (Catalog, error) {
 		return Catalog{}, err
 	}
 	continuationKey := make([]byte, 32)
-	if _, err := rand.Read(continuationKey); err != nil {
-		return Catalog{}, fmt.Errorf("create continuation key: %w", err)
+	switch {
+	case len(options.ContinuationKey) >= 32:
+		continuationKey = append([]byte(nil), options.ContinuationKey...)
+	case len(options.ContinuationKey) != 0:
+		return Catalog{}, errors.New("continuation key must be at least 32 bytes")
+	default:
+		if _, err := rand.Read(continuationKey); err != nil {
+			return Catalog{}, fmt.Errorf("create continuation key: %w", err)
+		}
 	}
 	catalog := Catalog{
 		ListOfferings: func(_ context.Context, request CatalogRequest) (odp.Page[odp.Offering], error) {
@@ -111,7 +123,7 @@ func NewStaticCatalog(options StaticCatalogOptions) (Catalog, error) {
 		}
 		catalog.ListCollectionOfferings = func(_ context.Context, id string, request CatalogRequest) (odp.Page[odp.Offering], error) {
 			if _, ok := collectionByID[id]; !ok {
-				return odp.Page[odp.Offering]{}, requestError(404, "NOT_FOUND", "Collection not found")
+				return odp.Page[odp.Offering]{}, requestError(http.StatusNotFound, "NOT_FOUND", "Collection not found")
 			}
 			members := make([]odp.Offering, 0)
 			for _, offering := range offerings {
@@ -134,6 +146,9 @@ func staticPage[Value any](values []Value, request CatalogRequest, terse func(Va
 	if err != nil {
 		return odp.Page[Value]{}, err
 	}
+	// A cursor is bound to the request that issued it, so an offset past the end is unreachable
+	// today. Clamping it keeps a future mutable catalog from turning that into a slice panic.
+	offset = min(offset, len(values))
 	end := min(offset+limit, len(values))
 	items := make([]Value, 0, end-offset)
 	for _, stored := range values[offset:end] {
@@ -159,8 +174,8 @@ func staticPage[Value any](values []Value, request CatalogRequest, terse func(Va
 
 func continuation(offset int, request CatalogRequest, limit int, key []byte) (string, error) {
 	state := staticContinuation{
-		ExpiresAt: time.Now().Add(continuationLifetime).Unix(), Language: request.Language, Limit: limit, Offset: offset,
-		Representation: string(request.Representation), Target: request.Request.URL.Path,
+		ExpiresAt: continuationExpiry(time.Now()), Language: request.Language, Limit: limit, Offset: offset,
+		Representation: string(request.Representation), Target: target(request),
 	}
 	data, err := json.Marshal(state)
 	if err != nil {
@@ -173,7 +188,14 @@ func continuation(offset int, request CatalogRequest, limit int, key []byte) (st
 		"limit":          []string{strconv.Itoa(limit)},
 		"representation": []string{string(request.Representation)},
 	}
-	return request.Request.URL.Path + "?" + query.Encode(), nil
+	return target(request) + "?" + query.Encode(), nil
+}
+
+// continuationExpiry is quantised to the lifetime, so two identical requests a second apart mint
+// the same cursor and therefore the same page bytes and the same entity tag. The cost is that a
+// cursor lives somewhere between one and two lifetimes rather than exactly one.
+func continuationExpiry(now time.Time) int64 {
+	return now.Truncate(continuationLifetime).Add(2 * continuationLifetime).Unix()
 }
 
 func consumeCursor(request CatalogRequest, limit int, key []byte) (int, error) {
@@ -182,12 +204,18 @@ func consumeCursor(request CatalogRequest, limit int, key []byte) (int, error) {
 	}
 	state, ok := decodeContinuation(request.Cursor, key)
 	if !ok || state.ExpiresAt < time.Now().Unix() {
-		return 0, requestError(410, "CONTINUATION_EXPIRED", "Continuation is unavailable")
+		return 0, requestError(http.StatusGone, "CONTINUATION_EXPIRED", "Continuation is unavailable")
 	}
-	if state.Language != request.Language || state.Limit != limit || state.Representation != string(request.Representation) || state.Target != request.Request.URL.Path {
-		return 0, requestError(400, "INVALID_REQUEST", "Continuation context changed")
+	if state.Language != request.Language || state.Limit != limit || state.Representation != string(request.Representation) || state.Target != target(request) {
+		return 0, requestError(http.StatusBadRequest, "INVALID_REQUEST", "Continuation context changed")
 	}
 	return state.Offset, nil
+}
+
+// target identifies the operation a continuation belongs to. It reads the path as it arrived,
+// because that is the form the continuation is served back as.
+func target(request CatalogRequest) string {
+	return request.Request.URL.EscapedPath()
 }
 
 func decodeContinuation(cursor string, key []byte) (staticContinuation, bool) {
@@ -195,12 +223,8 @@ func decodeContinuation(cursor string, key []byte) (staticContinuation, bool) {
 	if len(parts) != 2 {
 		return staticContinuation{}, false
 	}
-	expected, err := base64.RawURLEncoding.DecodeString(sign(parts[0], key))
-	if err != nil {
-		return staticContinuation{}, false
-	}
 	actual, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil || !hmac.Equal(actual, expected) {
+	if err != nil || !hmac.Equal(actual, signature(parts[0], key)) {
 		return staticContinuation{}, false
 	}
 	data, err := base64.RawURLEncoding.DecodeString(parts[0])
@@ -217,10 +241,14 @@ func decodeContinuation(cursor string, key []byte) (staticContinuation, bool) {
 	return state, true
 }
 
-func sign(payload string, key []byte) string {
+func signature(payload string, key []byte) []byte {
 	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write([]byte(payload))
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return mac.Sum(nil)
+}
+
+func sign(payload string, key []byte) string {
+	return base64.RawURLEncoding.EncodeToString(signature(payload, key))
 }
 
 func terseOffering(offering odp.Offering) odp.Offering {
