@@ -31,6 +31,7 @@ type ServiceFilters struct {
 	Keywords   []string                 `json:"keywords,omitempty"`
 	Operations []OperationFilter        `json:"operations,omitempty"`
 	Payments   []PaymentFilter          `json:"payments,omitempty"`
+	Trust      []odp.TrustProtocol      `json:"trust,omitempty"`
 }
 
 type OperationFilter struct {
@@ -83,6 +84,7 @@ type Facets struct {
 	Operations     []Facet[odp.OperationDescriptor]
 	PaymentOptions []Facet[PaymentOptionFacetValue]
 	Payments       []Facet[odp.PaymentProtocol]
+	Trust          []Facet[odp.TrustProtocol]
 }
 
 type PaymentOptionFacetValue struct {

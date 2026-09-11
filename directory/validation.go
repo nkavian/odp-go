@@ -63,7 +63,11 @@ func validateFilters(filters ServiceFilters) (ServiceFilters, error) {
 	if err != nil {
 		return ServiceFilters{}, err
 	}
-	return ServiceFilters{Enrollment: enrollment, Keywords: keywords, Operations: operationFilters, Payments: paymentFilters}, nil
+	trust, err := validateTrustFilters(filters.Trust)
+	if err != nil {
+		return ServiceFilters{}, err
+	}
+	return ServiceFilters{Enrollment: enrollment, Keywords: keywords, Operations: operationFilters, Payments: paymentFilters, Trust: trust}, nil
 }
 
 func parseSearchPage(data []byte) (SearchPage, error) {
@@ -207,9 +211,13 @@ func parseFacets(data []byte) (Facets, error) {
 	if err != nil {
 		return Facets{}, err
 	}
+	trust, err := parseDescriptorFacet(object["trust"], "trust", parseTrust)
+	if err != nil {
+		return Facets{}, err
+	}
 	return Facets{
 		Enrollment: enrollment, Keywords: keywords, Operations: operationFacets,
-		PaymentOptions: paymentOptions, Payments: payments,
+		PaymentOptions: paymentOptions, Payments: payments, Trust: trust,
 	}, nil
 }
 
@@ -324,6 +332,16 @@ func validatePaymentFilters(values []PaymentFilter) ([]PaymentFilter, error) {
 	return values, nil
 }
 
+func validateTrustFilters(values []odp.TrustProtocol) ([]odp.TrustProtocol, error) {
+	if values == nil {
+		return nil, nil
+	}
+	if len(values) != 1 || values[0].Name != odp.ProtocolTAP {
+		return nil, errors.New("trust is invalid")
+	}
+	return values, nil
+}
+
 func parseEnrollment(data json.RawMessage) (odp.EnrollmentProtocol, error) {
 	var object map[string]json.RawMessage
 	if json.Unmarshal(data, &object) != nil || len(object) != 1 {
@@ -379,6 +397,18 @@ func parsePaymentOptionFacet(data json.RawMessage) (PaymentOptionFacetValue, err
 	var value PaymentOptionFacetValue
 	if json.Unmarshal(data, &value) != nil || (value.Name != odp.ProtocolMPP && value.Name != odp.ProtocolX402) || !odp.IsPaymentOption(value.Option) {
 		return PaymentOptionFacetValue{}, errors.New("payment option facet is invalid")
+	}
+	return value, nil
+}
+
+func parseTrust(data json.RawMessage) (odp.TrustProtocol, error) {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(data, &object) != nil || len(object) != 1 {
+		return odp.TrustProtocol{}, errors.New("trust descriptor is invalid")
+	}
+	var value odp.TrustProtocol
+	if json.Unmarshal(data, &value) != nil || value.Name != odp.ProtocolTAP {
+		return odp.TrustProtocol{}, errors.New("trust descriptor is invalid")
 	}
 	return value, nil
 }
