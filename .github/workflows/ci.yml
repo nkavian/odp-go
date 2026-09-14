@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   verify:
@@ -34,6 +35,16 @@ jobs:
       - run: make verify
         env:
           ODP_SPECS_DIR: .conformance/odp-specs
+
+      - name: Upload coverage to Codecov
+        if: matrix.go == '1.26.x'
+        uses: codecov/codecov-action@v7
+        with:
+          fail_ci_if_error: true
+          files: ./coverage.out
+          flags: unit
+          name: go-1.26-unit
+          use_oidc: true
 
       - name: Verify clean module consumption
         run: make consumer-smoke
