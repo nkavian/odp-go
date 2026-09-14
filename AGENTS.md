@@ -21,7 +21,7 @@ authoritative protocol behavior.
 
 ## Conventions
 
-- Support Go 1.25 and newer; continuous integration covers Go 1.25 and 1.26.
+- Support Go 1.26 and newer; continuous integration covers Go 1.26 and 1.27.
 - Use the standard library when it is sufficient and justify every additional dependency.
 - Accept `context.Context` for operations that perform input/output or may block.
 - Return errors rather than logging from library packages.

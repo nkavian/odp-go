@@ -63,7 +63,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.25.x
+          go-version: 1.26.x
 
       - name: Verify release
         run: make spec-sync verify consumer-smoke conformance

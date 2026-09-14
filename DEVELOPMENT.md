@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Go 1.25 or newer.
+- Go 1.26 or newer.
 - A sibling `odp-specs` checkout for shared conformance work.
 
 ## Verification
@@ -14,7 +14,7 @@ make verify
 ```
 
 The gate checks Go formatting, module-file drift, static analysis, race detection, tests, and
-coverage generation. Continuous integration runs it on Go 1.25 and 1.26.
+coverage generation. Continuous integration runs it on Go 1.26 and 1.27.
 
 Use standard Go commands while iterating:
 
