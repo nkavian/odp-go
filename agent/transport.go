@@ -28,6 +28,11 @@ const (
 	mediaTypeProblem     = "application/problem+json"
 )
 
+// ErrResponseLimitExceeded reports that a response was refused because it exceeded one of the
+// protocol's byte or nesting-depth limits, which the draft asks an Agent-oriented SDK to surface
+// as a local RESPONSE_LIMIT_EXCEEDED failure rather than as a Service error.
+var ErrResponseLimitExceeded = errors.New("RESPONSE_LIMIT_EXCEEDED")
+
 type responseData struct {
 	body      []byte
 	finalURL  string
@@ -123,7 +128,7 @@ func request(ctx context.Context, client *http.Client, method, target string, bo
 			continue
 		}
 		responseLimit := maximumBytes
-		if response.StatusCode != http.StatusNotModified && (response.StatusCode < 200 || response.StatusCode > 299) {
+		if response.StatusCode < 200 || response.StatusCode > 299 {
 			responseLimit = min(responseLimit, maximumProblemBytes)
 		}
 		result, err := consumeResponse(response, responseLimit)
@@ -134,6 +139,21 @@ func request(ctx context.Context, client *http.Client, method, target string, bo
 		if result.status == http.StatusNotModified {
 			if !cached {
 				return responseData{}, errors.New("ODP response returned 304 without a cached representation")
+			}
+			// A 304 that echoes a validator names the representation it is confirming. When that is
+			// not the one held, the cached body is a different representation and serving it answers
+			// with content the Service did not confirm.
+			if echoed := response.Header.Get("ETag"); echoed != "" && echoed != record.ETag {
+				_ = cache.Delete(ctx, cacheKey)
+				return responseData{}, errors.New("ODP 304 confirmed a validator the cache does not hold")
+			}
+			// Revalidation can introduce a Vary the cache key does not cover; refreshing the entry
+			// anyway would serve one variant for every request.
+			if !supportedVary(response.Header.Values("Vary")) {
+				if err := cache.Delete(ctx, cacheKey); err != nil {
+					return responseData{}, err
+				}
+				return responseData{body: record.Body, finalURL: current.String(), freshness: FreshnessRevalidated, status: record.Status}, nil
 			}
 			if validate != nil {
 				if err := validate(record.Body); err != nil {
@@ -210,14 +230,14 @@ func cachedRecord(ctx context.Context, cache Cache, key string) (CacheRecord, bo
 func consumeResponse(response *http.Response, limit int64) (responseData, error) {
 	defer response.Body.Close()
 	if response.ContentLength > limit {
-		return responseData{}, errors.New("ODP response exceeds its byte limit")
+		return responseData{}, fmt.Errorf("%w: ODP response exceeds its byte limit", ErrResponseLimitExceeded)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
 	if err != nil {
 		return responseData{}, err
 	}
 	if int64(len(body)) > limit {
-		return responseData{}, errors.New("ODP response exceeds its byte limit")
+		return responseData{}, fmt.Errorf("%w: ODP response exceeds its byte limit", ErrResponseLimitExceeded)
 	}
 	if !utf8.Valid(body) {
 		return responseData{}, errors.New("ODP response must use UTF-8")

@@ -18,18 +18,38 @@ const (
 	maximumDocumentDepth = 8
 	maximumRequestBytes  = maximumDocumentBytes
 	maximumResourceDepth = 16
+	// A traversal bound that stops a runaway continuation chain. The draft sets no page count for
+	// catalog pagination; its only 16-page limit governs a linked capability source.
+	maximumTraversalPages = 10_000
 )
+
+// refinementPolicy states whether a response may carry refinements at all, and which filters the
+// request asked to refine on. Only the initial response of a search that asked for them may.
+type refinementPolicy struct {
+	allowed   map[string]bool
+	permitted bool
+}
+
+func searchRefinementPolicy(requested []string) refinementPolicy {
+	if len(requested) == 0 {
+		return refinementPolicy{}
+	}
+	allowed := make(map[string]bool, len(requested))
+	for _, id := range requested {
+		allowed[id] = true
+	}
+	return refinementPolicy{allowed: allowed, permitted: true}
+}
 
 type ServiceClient struct {
 	acceptLanguage   string
-	cache            Cache
 	client           *http.Client
 	fallbacks        CacheFallbacks
 	initialPageSize  int
 	inspectionGate   chan struct{}
 	maxRedirects     int
 	partition        string
-	resourceCache    Cache
+	requestCache     Cache
 	serviceOrigin    string
 	supportingClient *http.Client
 	supportingCache  Cache
@@ -57,8 +77,11 @@ func NewServiceClient(options ServiceClientOptions) (*ServiceClient, error) {
 		return nil, errors.New("maximum redirects must be from 1 through 5")
 	}
 	fallbacks := options.CacheFallbacks
-	if fallbacks.ServiceDocument == 0 {
-		fallbacks.ServiceDocument = ServiceDocumentFallback
+	if fallbacks.AttributeSchema == 0 {
+		fallbacks.AttributeSchema = AttributeSchemaFallback
+	}
+	if fallbacks.CapabilityDefinition == 0 {
+		fallbacks.CapabilityDefinition = CapabilityDefinitionFallback
 	}
 	if fallbacks.Collection == 0 {
 		fallbacks.Collection = CollectionFallback
@@ -66,7 +89,11 @@ func NewServiceClient(options ServiceClientOptions) (*ServiceClient, error) {
 	if fallbacks.Offering == 0 {
 		fallbacks.Offering = OfferingFallback
 	}
-	if fallbacks.ServiceDocument < 0 || fallbacks.Collection < 0 || fallbacks.Offering < 0 {
+	if fallbacks.ServiceDocument == 0 {
+		fallbacks.ServiceDocument = ServiceDocumentFallback
+	}
+	if fallbacks.AttributeSchema < 0 || fallbacks.CapabilityDefinition < 0 || fallbacks.Collection < 0 ||
+		fallbacks.Offering < 0 || fallbacks.Search < 0 || fallbacks.ServiceDocument < 0 {
 		return nil, errors.New("cache fallbacks cannot be negative")
 	}
 	base := options.HTTPClient
@@ -85,14 +112,14 @@ func NewServiceClient(options ServiceClientOptions) (*ServiceClient, error) {
 	if cache == nil {
 		cache = NewMemoryCache()
 	}
-	resourceCache := cache
+	requestCache := cache
 	if options.HTTPClient != nil && !hasCachePartition {
-		resourceCache = nil
+		requestCache = nil
 	}
 	return &ServiceClient{
-		acceptLanguage: options.AcceptLanguage, cache: cache, client: &client, fallbacks: fallbacks,
+		acceptLanguage: options.AcceptLanguage, client: &client, fallbacks: fallbacks,
 		initialPageSize: options.InitialPageSize, inspectionGate: make(chan struct{}, 1), maxRedirects: options.MaxRedirects,
-		partition: options.CachePartition, resourceCache: resourceCache, serviceOrigin: serviceOrigin, supportingCache: cache, supportingClient: &supportingClient,
+		partition: options.CachePartition, requestCache: requestCache, serviceOrigin: serviceOrigin, supportingCache: cache, supportingClient: &supportingClient,
 	}, nil
 }
 
@@ -111,7 +138,7 @@ func (client *ServiceClient) Inspect(ctx context.Context) (Inspection, error) {
 		_, err := odp.ParseAgentServiceDocument(data)
 		return err
 	}
-	result, err := request(ctx, client.client, http.MethodGet, target, nil, client.acceptLanguage, client.maxRedirects, maximumDocumentBytes, client.cache, cacheKey(client.partition, http.MethodGet, target, client.acceptLanguage, nil), client.fallbacks.ServiceDocument, validate)
+	result, err := request(ctx, client.client, http.MethodGet, target, nil, client.acceptLanguage, client.maxRedirects, maximumDocumentBytes, client.requestCache, cacheKey(client.partition, http.MethodGet, target, client.acceptLanguage, nil), client.fallbacks.ServiceDocument, validate)
 	if err != nil {
 		return Inspection{}, err
 	}
@@ -287,15 +314,21 @@ func (client *ServiceClient) getWithInspection(ctx context.Context, inspection I
 			if err != nil {
 				return err
 			}
-			return requireCollectionRepresentation(collection, defaultRepresentation(representation, odp.RepresentationFull))
+			if err := requireCollectionRepresentation(collection, defaultRepresentation(representation, odp.RepresentationFull)); err != nil {
+				return err
+			}
+			return requireResourceID(collection.ID, id, "Collection")
 		}
 		offering, err := parseAgentOffering(data)
 		if err != nil {
 			return err
 		}
-		return requireOfferingRepresentation(offering, defaultRepresentation(representation, odp.RepresentationFull))
+		if err := requireOfferingRepresentation(offering, defaultRepresentation(representation, odp.RepresentationFull)); err != nil {
+			return err
+		}
+		return requireResourceID(offering.ID, id, "Offering")
 	}
-	result, err := request(ctx, client.client, http.MethodGet, target.String(), nil, client.acceptLanguage, client.maxRedirects, maximumResourceBytes, client.resourceCache, key, fallback, validate)
+	result, err := request(ctx, client.client, http.MethodGet, target.String(), nil, client.acceptLanguage, client.maxRedirects, maximumResourceBytes, client.requestCache, key, fallback, validate)
 	if err != nil {
 		return nil, err
 	}
@@ -318,6 +351,9 @@ func (client *ServiceClient) collectionItems(ctx context.Context, operation odp.
 				if !yield(item, nil) {
 					return
 				}
+				if options.MaxItems != 0 && count >= options.MaxItems {
+					return
+				}
 			}
 		}
 	}
@@ -337,6 +373,9 @@ func (client *ServiceClient) continueCollectionItems(ctx context.Context, next s
 				}
 				count++
 				if !yield(item, nil) {
+					return
+				}
+				if options.MaxItems != 0 && count >= options.MaxItems {
 					return
 				}
 			}
@@ -361,7 +400,7 @@ func (client *ServiceClient) continueCollectionPages(ctx context.Context, next s
 		}
 		fallback := client.fallbacks.Collection
 		if search {
-			fallback = 0
+			fallback = client.fallbacks.Search
 		}
 		data, err := client.continueRequest(ctx, next, fallback, validate)
 		if err != nil {
@@ -383,7 +422,7 @@ func (client *ServiceClient) collectionPages(ctx context.Context, operation odp.
 			yield(odp.Page[odp.Collection]{}, err)
 			return
 		}
-		initial, err := client.initialRequest(ctx, operation, id, options, search)
+		initial, err := client.initialRequest(ctx, operation, id, options, searchBody(search), refinementPolicy{})
 		if err != nil {
 			yield(odp.Page[odp.Collection]{}, err)
 			return
@@ -396,7 +435,7 @@ func (client *ServiceClient) collectionPages(ctx context.Context, operation odp.
 		}
 		fallback := client.fallbacks.Collection
 		if operation == odp.OperationSearchCollections {
-			fallback = 0
+			fallback = client.fallbacks.Search
 		}
 		client.yieldCollectionPages(ctx, page, representation, options.MaxPages, fallback, "", yield)
 	}
@@ -405,7 +444,7 @@ func (client *ServiceClient) collectionPages(ctx context.Context, operation odp.
 func (client *ServiceClient) yieldCollectionPages(ctx context.Context, first odp.Page[odp.Collection], representation odp.Representation, maxPages int, fallback time.Duration, initialReference string, yield func(odp.Page[odp.Collection], error) bool) {
 	pages := maxPages
 	if pages == 0 {
-		pages = odp.MaxTraversalPages
+		pages = maximumTraversalPages
 	}
 	page := first
 	visited := make(map[string]struct{})
@@ -460,6 +499,9 @@ func (client *ServiceClient) offeringItems(ctx context.Context, operation odp.Op
 				if !yield(item, nil) {
 					return
 				}
+				if options.MaxItems != 0 && count >= options.MaxItems {
+					return
+				}
 			}
 		}
 	}
@@ -481,6 +523,9 @@ func (client *ServiceClient) continueOfferingItems(ctx context.Context, next str
 				if !yield(item, nil) {
 					return
 				}
+				if options.MaxItems != 0 && count >= options.MaxItems {
+					return
+				}
 			}
 		}
 	}
@@ -498,30 +543,26 @@ func (client *ServiceClient) continueOfferingPages(ctx context.Context, next str
 			if jsonvalue.Depth(data) > maximumResourceDepth {
 				return errors.New("ODP response exceeds its nesting-depth limit")
 			}
-			_, err := parseOfferingPage(data, search, representation)
+			_, err := parseOfferingPage(data, search, representation, refinementPolicy{})
 			return err
 		}
 		fallback := client.fallbacks.Offering
 		if search {
-			fallback = 0
+			fallback = client.fallbacks.Search
 		}
 		data, err := client.continueRequest(ctx, next, fallback, validate)
 		if err != nil {
 			yield(odp.OfferingPage[odp.Offering]{}, err)
 			return
 		}
-		page, err := parseOfferingPage(data, search, representation)
+		page, err := parseOfferingPage(data, search, representation, refinementPolicy{})
 		if err != nil {
 			yield(odp.OfferingPage[odp.Offering]{}, err)
 			return
 		}
-		if search && len(page.Refinements) != 0 {
-			yield(odp.OfferingPage[odp.Offering]{}, errors.New("ODP Offering search continuation cannot contain refinements"))
-			return
-		}
 		pages := options.MaxPages
 		if pages == 0 {
-			pages = odp.MaxTraversalPages
+			pages = maximumTraversalPages
 		}
 		load := func(ctx context.Context, reference string) ([]byte, error) {
 			return client.continueRequest(ctx, reference, fallback, validate)
@@ -544,31 +585,35 @@ func (client *ServiceClient) offeringPages(ctx context.Context, operation odp.Op
 			yield(odp.OfferingPage[odp.Offering]{}, err)
 			return
 		}
-		initial, err := client.initialRequest(ctx, operation, id, options, search)
+		policy := refinementPolicy{}
+		if search != nil {
+			policy = searchRefinementPolicy(search.Refinements)
+		}
+		initial, err := client.initialRequest(ctx, operation, id, options, searchBody(search), policy)
 		if err != nil {
 			yield(odp.OfferingPage[odp.Offering]{}, err)
 			return
 		}
 		representation := defaultRepresentation(options.Representation, odp.RepresentationTerse)
-		page, err := parseOfferingPage(initial, operation == odp.OperationSearchOfferings, representation)
+		page, err := parseOfferingPage(initial, operation == odp.OperationSearchOfferings, representation, policy)
 		if err != nil {
 			yield(odp.OfferingPage[odp.Offering]{}, err)
 			return
 		}
 		pages := options.MaxPages
 		if pages == 0 {
-			pages = odp.MaxTraversalPages
+			pages = maximumTraversalPages
 		}
 		fallback := client.fallbacks.Offering
 		if operation == odp.OperationSearchOfferings {
-			fallback = 0
+			fallback = client.fallbacks.Search
 		}
 		load := func(ctx context.Context, next string) ([]byte, error) {
 			validate := func(data []byte) error {
 				if jsonvalue.Depth(data) > maximumResourceDepth {
 					return errors.New("ODP response exceeds its nesting-depth limit")
 				}
-				_, err := parseOfferingPage(data, operation == odp.OperationSearchOfferings, representation)
+				_, err := parseOfferingPage(data, operation == odp.OperationSearchOfferings, representation, refinementPolicy{})
 				return err
 			}
 			return client.continueRequest(ctx, next, fallback, validate)
@@ -585,7 +630,17 @@ func (client *ServiceClient) offeringPages(ctx context.Context, operation odp.Op
 	}
 }
 
-func (client *ServiceClient) initialRequest(ctx context.Context, operation odp.Operation, id string, options ListOptions, body any) ([]byte, error) {
+// searchBody makes the absence of a search document explicit. A nil *T stored in an any is not
+// itself nil, so passing the pointer straight through would send an encoded "null" body on a list
+// operation and skip the limit query parameter entirely.
+func searchBody[Request any](request *Request) any {
+	if request == nil {
+		return nil
+	}
+	return request
+}
+
+func (client *ServiceClient) initialRequest(ctx context.Context, operation odp.Operation, id string, options ListOptions, body any, policy refinementPolicy) ([]byte, error) {
 	inspection, err := client.Inspect(ctx)
 	if err != nil {
 		return nil, err
@@ -599,7 +654,10 @@ func (client *ServiceClient) initialRequest(ctx context.Context, operation odp.O
 	}
 	query := target.Query()
 	query.Set("representation", string(defaultRepresentation(options.Representation, odp.RepresentationTerse)))
-	method := odpMethod(operation)
+	method, err := odpMethod(operation)
+	if err != nil {
+		return nil, err
+	}
 	var encoded []byte
 	if body != nil {
 		encoded, err = json.Marshal(body)
@@ -628,7 +686,7 @@ func (client *ServiceClient) initialRequest(ctx context.Context, operation odp.O
 		fallback = client.fallbacks.Collection
 	}
 	if operation == odp.OperationSearchCollections || operation == odp.OperationSearchOfferings {
-		fallback = 0
+		fallback = client.fallbacks.Search
 	}
 	key := cacheKey(client.partition, method, target.String(), client.acceptLanguage, encoded)
 	validate := func(data []byte) error {
@@ -639,10 +697,10 @@ func (client *ServiceClient) initialRequest(ctx context.Context, operation odp.O
 			_, err := parseCollectionPage(data, defaultRepresentation(options.Representation, odp.RepresentationTerse))
 			return err
 		}
-		_, err := parseOfferingPage(data, operation == odp.OperationSearchOfferings, defaultRepresentation(options.Representation, odp.RepresentationTerse))
+		_, err := parseOfferingPage(data, operation == odp.OperationSearchOfferings, defaultRepresentation(options.Representation, odp.RepresentationTerse), policy)
 		return err
 	}
-	result, err := request(ctx, client.client, method, target.String(), encoded, client.acceptLanguage, client.maxRedirects, maximumResourceBytes, client.resourceCache, key, fallback, validate)
+	result, err := request(ctx, client.client, method, target.String(), encoded, client.acceptLanguage, client.maxRedirects, maximumResourceBytes, client.requestCache, key, fallback, validate)
 	if err != nil {
 		return nil, err
 	}
@@ -655,7 +713,7 @@ func (client *ServiceClient) continueRequest(ctx context.Context, reference stri
 		return nil, err
 	}
 	key := cacheKey(client.partition, http.MethodGet, target.String(), client.acceptLanguage, nil)
-	result, err := request(ctx, client.client, http.MethodGet, target.String(), nil, client.acceptLanguage, client.maxRedirects, maximumResourceBytes, client.resourceCache, key, fallback, validate)
+	result, err := request(ctx, client.client, http.MethodGet, target.String(), nil, client.acceptLanguage, client.maxRedirects, maximumResourceBytes, client.requestCache, key, fallback, validate)
 	if err != nil {
 		return nil, err
 	}
@@ -671,10 +729,13 @@ func parseCollectionPage(data []byte, representation odp.Representation) (odp.Pa
 		return odp.Page[odp.Collection]{}, errors.New("ODP page cannot contain more than 100 items")
 	}
 	for _, item := range page.Items {
-		candidate := item
-		if candidate.ODPVersion == "" {
-			candidate.ODPVersion = page.ODPVersion
+		// VER-03: a nested item inherits the version of its containing document and cannot restate
+		// it, so a page whose items repeat it is not a document this Agent can rely on.
+		if item.ODPVersion != "" {
+			return odp.Page[odp.Collection]{}, errors.New("ODP page item cannot restate odp_version")
 		}
+		candidate := item
+		candidate.ODPVersion = page.ODPVersion
 		encoded, err := json.Marshal(candidate)
 		if err != nil {
 			return odp.Page[odp.Collection]{}, err
@@ -690,30 +751,36 @@ func parseCollectionPage(data []byte, representation odp.Representation) (odp.Pa
 	return page, nil
 }
 
-func parseOfferingPage(data []byte, search bool, representation odp.Representation) (odp.OfferingPage[odp.Offering], error) {
+func parseOfferingPage(data []byte, search bool, representation odp.Representation, policy refinementPolicy) (odp.OfferingPage[odp.Offering], error) {
 	if search {
 		page, err := parseAgentOfferingSearchResponse(data)
 		if err != nil {
 			return odp.OfferingPage[odp.Offering]{}, err
 		}
-		return validateOfferingPage(page, representation)
+		return validateOfferingPage(page, representation, policy)
 	}
 	page, err := parseAgentOfferingPage(data)
 	if err != nil {
 		return odp.OfferingPage[odp.Offering]{}, err
 	}
-	return validateOfferingPage(odp.OfferingPage[odp.Offering]{Additional: page.Additional, AuthExpands: page.AuthExpands, Items: page.Items, Next: page.Next, ODPVersion: page.ODPVersion}, representation)
+	return validateOfferingPage(odp.OfferingPage[odp.Offering]{Additional: page.Additional, AuthExpands: page.AuthExpands, Items: page.Items, Next: page.Next, ODPVersion: page.ODPVersion}, representation, policy)
 }
 
-func validateOfferingPage(page odp.OfferingPage[odp.Offering], representation odp.Representation) (odp.OfferingPage[odp.Offering], error) {
+func validateOfferingPage(page odp.OfferingPage[odp.Offering], representation odp.Representation, policy refinementPolicy) (odp.OfferingPage[odp.Offering], error) {
 	if len(page.Items) > 100 {
 		return odp.OfferingPage[odp.Offering]{}, errors.New("ODP page cannot contain more than 100 items")
 	}
+	if err := requireRefinements(page.Refinements, policy); err != nil {
+		return odp.OfferingPage[odp.Offering]{}, err
+	}
 	for _, item := range page.Items {
-		candidate := item
-		if candidate.ODPVersion == "" {
-			candidate.ODPVersion = page.ODPVersion
+		// VER-03: a nested item inherits the version of its containing document and cannot restate
+		// it, so a page whose items repeat it is not a document this Agent can rely on.
+		if item.ODPVersion != "" {
+			return odp.OfferingPage[odp.Offering]{}, errors.New("ODP page item cannot restate odp_version")
 		}
+		candidate := item
+		candidate.ODPVersion = page.ODPVersion
 		encoded, err := json.Marshal(candidate)
 		if err != nil {
 			return odp.OfferingPage[odp.Offering]{}, err
@@ -729,12 +796,41 @@ func validateOfferingPage(page odp.OfferingPage[odp.Offering], representation od
 	return page, nil
 }
 
+// OFR-14, OFR-15 and FLT-30: refinements appear only on the initial response of a search that
+// asked for them, name only filters that were asked for, and name each of those at most once.
+func requireRefinements(groups []odp.RefinementGroup, policy refinementPolicy) error {
+	if len(groups) == 0 {
+		return nil
+	}
+	if !policy.permitted {
+		return errors.New("ODP Offering search returned refinements that were not requested")
+	}
+	returned := map[string]bool{}
+	for _, group := range groups {
+		if !policy.allowed[group.FilterID] {
+			return fmt.Errorf("ODP Offering search returned refinement %s that was not requested", group.FilterID)
+		}
+		if returned[group.FilterID] {
+			return fmt.Errorf("ODP Offering search returned refinement %s more than once", group.FilterID)
+		}
+		returned[group.FilterID] = true
+	}
+	return nil
+}
+
 func requireOfferingRepresentation(offering odp.Offering, representation odp.Representation) error {
 	if representation == odp.RepresentationTerse && len(offering.Actions) != 0 {
 		return errors.New("ODP Terse Offering cannot contain Actions")
 	}
 	if representation == odp.RepresentationFull && len(offering.DetailFields) != 0 {
 		return errors.New("ODP Full Offering cannot contain detail_fields")
+	}
+	return nil
+}
+
+func requireResourceID(actual, expected, resourceType string) error {
+	if actual != expected {
+		return fmt.Errorf("ODP %s identifier does not match its request path", resourceType)
 	}
 	return nil
 }
@@ -770,7 +866,7 @@ func iterateOfferingPages(ctx context.Context, first odp.OfferingPage[odp.Offeri
 				yield(odp.OfferingPage[odp.Offering]{}, err)
 				return
 			}
-			page, err = parseOfferingPage(data, search, representation)
+			page, err = parseOfferingPage(data, search, representation, refinementPolicy{})
 			if err != nil {
 				yield(odp.OfferingPage[odp.Offering]{}, err)
 				return
@@ -786,8 +882,8 @@ func validateListOptions(options ListOptions) error {
 	if options.MaxItems < 0 || options.MaxItems > 10_000 {
 		return errors.New("maximum items must be from 1 through 10000")
 	}
-	if options.MaxPages < 0 || options.MaxPages > odp.MaxTraversalPages {
-		return errors.New("maximum pages must be from 1 through 16")
+	if options.MaxPages < 0 || options.MaxPages > maximumTraversalPages {
+		return fmt.Errorf("maximum pages must be from 1 through %d", maximumTraversalPages)
 	}
 	if options.Representation != "" && options.Representation != odp.RepresentationTerse && options.Representation != odp.RepresentationFull {
 		return errors.New("representation must be terse or full")
@@ -858,7 +954,10 @@ func requestLimit(value, fallback int) int {
 	return value
 }
 
-func odpMethod(operation odp.Operation) string {
-	method, _ := odp.OperationMethod(operation)
-	return method
+func odpMethod(operation odp.Operation) (string, error) {
+	method, ok := odp.OperationMethod(operation)
+	if !ok {
+		return "", fmt.Errorf("%w: %s", ErrUnsupportedOperation, operation)
+	}
+	return method, nil
 }

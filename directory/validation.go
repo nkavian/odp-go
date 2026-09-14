@@ -5,13 +5,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"net/netip"
+	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	odp "github.com/offering-protocol/odp-go"
 )
+
+// unverifiedMembers are Service Document members a directory cannot authoritatively assert. An
+// Agent MUST retrieve them from the Service itself before treating them as current (ROLE-03), so
+// they are dropped here rather than handed to a caller who might not (ROLE-06).
+var unverifiedMembers = []string{"branding", "http", "mcp", "odp_version", "payment_origins", "search_capabilities"}
+
+// A payment filter is identified by its protocol, authentication and option set together, so the
+// bound is on distinct combinations rather than on the two protocol names.
+const maximumPaymentFilters = 32
 
 var operations = []odp.Operation{
 	odp.OperationGetCollection,
@@ -75,17 +88,23 @@ func parseSearchPage(data []byte) (SearchPage, error) {
 	if err := json.Unmarshal(data, &object); err != nil {
 		return SearchPage{}, err
 	}
-	var itemValues []json.RawMessage
-	if err := json.Unmarshal(object["items"], &itemValues); err != nil || len(itemValues) > 100 {
+	itemsData, present := object["items"]
+	if !present || string(itemsData) == "null" {
 		return SearchPage{}, errors.New("Directory search page items are invalid")
 	}
-	items := make([]Service, len(itemValues))
+	var itemValues []json.RawMessage
+	if err := json.Unmarshal(itemsData, &itemValues); err != nil || len(itemValues) > 100 {
+		return SearchPage{}, errors.New("Directory search page items are invalid")
+	}
+	items := make([]Service, 0, len(itemValues))
+	var issues []Issue
 	for index, item := range itemValues {
 		parsed, err := parseService(item)
 		if err != nil {
-			return SearchPage{}, fmt.Errorf("Directory Service result %d: %w", index, err)
+			issues = append(issues, Issue{Index: index, Message: err.Error(), Scope: IssueService})
+			continue
 		}
-		items[index] = parsed
+		items = append(items, parsed)
 	}
 	next, err := optionalText(object["next"], "next", 2048)
 	if err != nil {
@@ -100,7 +119,8 @@ func parseSearchPage(data []byte) (SearchPage, error) {
 		facets = &parsed
 	}
 	return SearchPage{
-		Additional: cloneAdditional(object, "items", "next", "facets"), Facets: facets, Items: items, Next: next,
+		Additional: cloneAdditional(object, "items", "next", "facets"), Facets: facets,
+		Issues: issues, Items: items, Next: next,
 	}, nil
 }
 
@@ -114,8 +134,8 @@ func parseService(data []byte) (Service, error) {
 		return Service{}, err
 	}
 	canonical, err := odp.DeriveServiceOrigin(serviceOrigin)
-	if err != nil || canonical != serviceOrigin {
-		return Service{}, errors.New("Directory Service origin must be a canonical HTTPS origin")
+	if err != nil || canonical != serviceOrigin || !publicHTTPSOrigin(serviceOrigin) {
+		return Service{}, errors.New("Directory Service origin must be a canonical public HTTPS origin")
 	}
 	var document odp.ServiceDocument
 	document.ODPVersion = odp.Version
@@ -156,14 +176,25 @@ func parseService(data []byte) (Service, error) {
 			}
 		}
 	}
-	encoded, _ := json.Marshal(document)
-	if protocols, ok := object["protocols"]; ok {
-		var encodedDocument map[string]json.RawMessage
-		if err := json.Unmarshal(encoded, &encodedDocument); err != nil {
-			return Service{}, errors.New("protocols are invalid")
+	// ServiceDocument omits its optional members when empty, which would hide a member the
+	// directory did send but sent empty. Those are spliced back as raw JSON so the schema sees
+	// exactly what arrived, the way `protocols` already is.
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		return Service{}, errors.New("Directory Service result could not be validated")
+	}
+	var encodedDocument map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &encodedDocument); err != nil {
+		return Service{}, errors.New("Directory Service result could not be validated")
+	}
+	for _, name := range []string{"documentation_url", "keywords", "protocols", "status_url", "support_url", "website_url"} {
+		if raw, ok := object[name]; ok {
+			encodedDocument[name] = raw
 		}
-		encodedDocument["protocols"] = protocols
-		encoded, _ = json.Marshal(encodedDocument)
+	}
+	encoded, err = json.Marshal(encodedDocument)
+	if err != nil {
+		return Service{}, errors.New("Directory Service result could not be validated")
 	}
 	document, err = odp.ParseAgentServiceDocument(encoded)
 	if err != nil {
@@ -173,17 +204,42 @@ func parseService(data []byte) (Service, error) {
 	if err != nil {
 		return Service{}, err
 	}
-	indexedAt, err := time.Parse(time.RFC3339Nano, indexedText)
+	indexedAt, err := time.Parse(time.RFC3339Nano, strings.ToUpper(indexedText))
 	if err != nil {
 		return Service{}, errors.New("indexed_at must be a date-time")
 	}
+	known := append([]string{
+		"service_origin", "name", "description", "documentation_url", "language", "localizations",
+		"keywords", "operations", "protocols", "indexed_at", "status_url", "support_url", "website_url",
+	}, unverifiedMembers...)
 	return Service{
-		Additional:  cloneAdditional(object, "service_origin", "name", "description", "documentation_url", "language", "localizations", "keywords", "operations", "protocols", "indexed_at", "status_url", "support_url", "website_url"),
+		Additional:  cloneAdditional(object, known...),
 		Description: document.Description, DocumentationURL: document.DocumentationURL, IndexedAt: indexedAt, Keywords: document.Keywords,
 		Language: document.Language, Localizations: document.Localizations, Name: document.Name,
 		Operations: document.Operations, Protocols: document.Protocols, ServiceOrigin: serviceOrigin,
 		StatusURL: document.StatusURL, SupportURL: document.SupportURL, WebsiteURL: document.WebsiteURL,
 	}, nil
+}
+
+// publicHTTPSOrigin reports whether an origin a directory advertises is one a caller can safely
+// dereference. DeriveServiceOrigin allows loopback HTTP for local development, which is right for
+// a Service URL a caller chose and wrong for one a third party supplied.
+func publicHTTPSOrigin(origin string) bool {
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return false
+	}
+	address, err := netip.ParseAddr(strings.Trim(host, "[]"))
+	if err != nil {
+		return true
+	}
+	address = address.Unmap()
+	return address.IsGlobalUnicast() && !address.IsPrivate() && !address.IsLoopback() &&
+		!address.IsLinkLocalUnicast() && !netip.MustParsePrefix("100.64.0.0/10").Contains(address)
 }
 
 func parseFacets(data []byte) (Facets, error) {
@@ -226,8 +282,8 @@ func parseFacet[Value ~string](data []byte, name string, allowed []Value) ([]Fac
 		return nil, nil
 	}
 	var entries []struct {
-		Count json.Number `json:"count"`
-		Value Value       `json:"value"`
+		Count json.RawMessage `json:"count"`
+		Value Value           `json:"value"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
@@ -240,8 +296,8 @@ func parseFacet[Value ~string](data []byte, name string, allowed []Value) ([]Fac
 		if err != nil || (allowed != nil && !slices.Contains(allowed, Value(value))) {
 			return nil, fmt.Errorf("%s facet value is invalid", name)
 		}
-		count, err := strconvInt64(entry.Count.String())
-		if err != nil || count < 0 || count > 9_007_199_254_740_991 {
+		count, err := facetCount(entry.Count)
+		if err != nil || count < 0 {
 			return nil, fmt.Errorf("%s facet count is invalid", name)
 		}
 		result[index] = Facet[Value]{Count: count, Value: Value(value)}
@@ -254,7 +310,7 @@ func parseDescriptorFacet[Value any](data []byte, name string, parse func(json.R
 		return nil, nil
 	}
 	var entries []struct {
-		Count json.Number     `json:"count"`
+		Count json.RawMessage `json:"count"`
 		Value json.RawMessage `json:"value"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -268,8 +324,8 @@ func parseDescriptorFacet[Value any](data []byte, name string, parse func(json.R
 		if err != nil {
 			return nil, fmt.Errorf("%s facet value is invalid", name)
 		}
-		count, err := strconvInt64(entry.Count.String())
-		if err != nil || count < 0 || count > 9_007_199_254_740_991 {
+		count, err := facetCount(entry.Count)
+		if err != nil || count < 0 {
 			return nil, fmt.Errorf("%s facet count is invalid", name)
 		}
 		result[index] = Facet[Value]{Count: count, Value: value}
@@ -291,7 +347,7 @@ func validateOperationFilters(values []OperationFilter) ([]OperationFilter, erro
 	if values == nil {
 		return nil, nil
 	}
-	if len(values) == 0 || len(values) > len(operations) {
+	if len(values) == 0 || len(values) > len(operations)*3 {
 		return nil, errors.New("operations are invalid")
 	}
 	seen := make(map[string]struct{}, len(values))
@@ -312,7 +368,7 @@ func validatePaymentFilters(values []PaymentFilter) ([]PaymentFilter, error) {
 	if values == nil {
 		return nil, nil
 	}
-	if len(values) == 0 || len(values) > 2 {
+	if len(values) == 0 || len(values) > maximumPaymentFilters {
 		return nil, errors.New("payments are invalid")
 	}
 	seen := make(map[string]struct{}, len(values))
@@ -394,6 +450,12 @@ func parsePaymentOptionFacet(data json.RawMessage) (PaymentOptionFacetValue, err
 	if json.Unmarshal(data, &object) != nil || len(object) != 2 {
 		return PaymentOptionFacetValue{}, errors.New("payment option facet is invalid")
 	}
+	if _, found := object["name"]; !found {
+		return PaymentOptionFacetValue{}, errors.New("payment option facet is invalid")
+	}
+	if _, found := object["option"]; !found {
+		return PaymentOptionFacetValue{}, errors.New("payment option facet is invalid")
+	}
 	var value PaymentOptionFacetValue
 	if json.Unmarshal(data, &value) != nil || (value.Name != odp.ProtocolMPP && value.Name != odp.ProtocolX402) || !odp.IsPaymentOption(value.Option) {
 		return PaymentOptionFacetValue{}, errors.New("payment option facet is invalid")
@@ -451,14 +513,31 @@ func parseSuggestions(data []byte) ([]string, error) {
 	if err := json.Unmarshal(data, &object); err != nil {
 		return nil, errors.New("Directory suggestions must be an object")
 	}
-	var items []string
-	if err := json.Unmarshal(object["items"], &items); err != nil {
+	raw, present := object["items"]
+	if !present || string(raw) == "null" {
 		return nil, errors.New("suggestions are invalid")
 	}
-	if items != nil && len(items) == 0 {
-		return items, nil
+	var items []string
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, errors.New("suggestions are invalid")
 	}
-	return uniqueText(items, "suggestions", 25, 128)
+	result := make([]string, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		value, err := requireText(item, "suggestions", 1, 128)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+		if len(result) == 25 {
+			break
+		}
+	}
+	return result, nil
 }
 
 func requiredText(data []byte, name string, minimum, maximum int) (string, error) {
@@ -470,7 +549,7 @@ func requiredText(data []byte, name string, minimum, maximum int) (string, error
 }
 
 func optionalText(data []byte, name string, maximum int) (string, error) {
-	if data == nil {
+	if data == nil || string(data) == "null" {
 		return "", nil
 	}
 	return requiredText(data, name, 1, maximum)
@@ -518,8 +597,24 @@ func decodeRequired(object map[string]json.RawMessage, name string, target any) 
 	return nil
 }
 
+// facetCount reads a count that must have arrived as a JSON number rather than as a string
+// spelling of one, which encoding/json would otherwise accept into a json.Number.
+func facetCount(raw json.RawMessage) (int64, error) {
+	text := strings.TrimSpace(string(raw))
+	if text == "" || text[0] == '"' {
+		return 0, errors.New("count must be a number")
+	}
+	return strconvInt64(text)
+}
+
 func strconvInt64(value string) (int64, error) {
-	var number int64
-	_, err := fmt.Sscan(value, &number)
-	return number, err
+	if number, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return number, nil
+	}
+	// JSON has no integer type, so an exponent is a legitimate spelling of a whole number.
+	number, err := strconv.ParseFloat(value, 64)
+	if err != nil || number != math.Trunc(number) || math.Abs(number) > 9_007_199_254_740_991 {
+		return 0, errors.New("value is not an integer")
+	}
+	return int64(number), nil
 }

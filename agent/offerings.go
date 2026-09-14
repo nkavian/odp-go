@@ -38,9 +38,12 @@ func (client *ServiceClient) GetOfferingDetails(ctx context.Context, id string) 
 	}
 	details.AttributeSchema = schema
 	if offering.Attributes != nil {
-		encoded, _ := json.Marshal(offering.Attributes)
+		encoded, marshalErr := json.Marshal(offering.Attributes)
 		var attributes any
-		if json.Unmarshal(encoded, &attributes) != nil || validator.Validate(attributes) != nil {
+		if marshalErr != nil {
+			details.Offering.Attributes = nil
+			details.Issues = append(details.Issues, OfferingIssue{Message: "Offering attributes could not be encoded for validation", Scope: OfferingIssueAttributes})
+		} else if json.Unmarshal(encoded, &attributes) != nil || validator.Validate(attributes) != nil {
 			details.Offering.Attributes = nil
 			details.Issues = append(details.Issues, OfferingIssue{Message: "Offering attributes do not match their Attribute Schema", Scope: OfferingIssueAttributes})
 		}
@@ -122,6 +125,7 @@ func normalizeActions(actions []odp.Action, serviceOrigin, serviceOpenAPIURL str
 			}
 			discovered.OpenAPI = &DiscoveredOpenAPIAction{OperationID: action.OpenAPI.OperationID, URL: target}
 		} else {
+			issues = append(issues, OfferingIssue{ActionID: action.ID, Message: "Action has neither an HTTP nor an OpenAPI target", Scope: OfferingIssueAction})
 			continue
 		}
 		result = append(result, discovered)

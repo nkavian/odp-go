@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
@@ -30,7 +29,6 @@ func (client *ServiceClient) resolveSchema(ctx context.Context, reference string
 	}
 	rootURL.Fragment = ""
 	documents := map[string]map[string]any{}
-	depths := map[string]int{rootURL.String(): 0}
 	graphBytes := 0
 	var load func(string, int) error
 	load = func(documentURL string, depth int) error {
@@ -43,7 +41,7 @@ func (client *ServiceClient) resolveSchema(ctx context.Context, reference string
 		if depth > maximumAttributeDepth {
 			return errors.New("ODP Attribute Schema graph exceeds eight reference levels")
 		}
-		document, err := client.supportingJSON(ctx, documentURL, "attribute-schema", attributeSchemaMediaType, []string{attributeSchemaMediaType}, maximumAttributeDocumentSize, 24*time.Hour)
+		document, err := client.supportingJSON(ctx, documentURL, "attribute-schema", attributeSchemaMediaType, []string{attributeSchemaMediaType}, maximumAttributeDocumentSize, maximumResourceDepth, client.fallbacks.AttributeSchema)
 		if err != nil {
 			return err
 		}
@@ -65,7 +63,6 @@ func (client *ServiceClient) resolveSchema(ctx context.Context, reference string
 			return err
 		}
 		documents[documentURL] = document
-		depths[documentURL] = depth
 		references, err := schemaReferences(document, documentURL)
 		if err != nil {
 			return err

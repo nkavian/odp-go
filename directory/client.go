@@ -9,6 +9,7 @@ import (
 	"io"
 	"iter"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -17,8 +18,16 @@ import (
 )
 
 const (
-	maximumItems         = 10_000
-	maximumPages         = 16
+	// A failure message travels into logs and error reporting, so an error body is read and
+	// rendered far more tightly than a successful one.
+	maximumErrorBytes = 16_384
+	maximumErrorRunes = 2_048
+	maximumItems      = 10_000
+	// The page budget a caller gets by default, and the bound that stops a runaway traversal.
+	// They are separate: stopping at the caller's budget is what the caller asked for, while
+	// reaching the guard means the directory never stopped offering continuations.
+	defaultPages         = 16
+	maximumPages         = 10_000
 	maximumRedirects     = 5
 	maximumResponseBytes = 524_288
 )
@@ -42,78 +51,64 @@ func New(options Options) (*Client, error) {
 	}
 	httpClient := *base
 	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Client{environment: environment, httpClient: &httpClient, origin: origin}, nil
+	originURL, err := url.Parse(origin)
+	if err != nil {
+		return nil, fmt.Errorf("parse Directory origin: %w", err)
+	}
+	return &Client{environment: environment, httpClient: &httpClient, originURL: originURL}, nil
 }
 
 func (client *Client) SearchPages(ctx context.Context, request SearchRequest, options IterationOptions) iter.Seq2[SearchPage, error] {
 	body, validationError := validateSearchRequest(request)
-	maxPages := options.MaxPages
-	if maxPages == 0 {
-		maxPages = maximumPages
-	}
-	if maxPages < 1 || maxPages > maximumPages {
-		validationError = errors.New("maxPages must be an integer from 1 through 16")
+	maxPages, budgetError := pageBudget(options.MaxPages)
+	if validationError == nil {
+		validationError = budgetError
 	}
 	return func(yield func(SearchPage, error) bool) {
 		if validationError != nil {
 			yield(SearchPage{}, validationError)
 			return
 		}
-		current := client.origin + "/v1/services/search"
-		method := http.MethodPost
-		requestBody := body
-		for pageNumber := 0; pageNumber < maxPages; pageNumber++ {
-			data, err := client.requestJSON(ctx, method, current, requestBody)
-			if err != nil {
-				yield(SearchPage{}, err)
-				return
-			}
-			page, err := parseSearchPage(data)
-			if err != nil {
-				yield(SearchPage{}, err)
-				return
-			}
-			if !yield(page, nil) || page.Next == "" {
-				return
-			}
-			current, err = client.continuationURL(page.Next)
-			if err != nil {
-				yield(SearchPage{}, err)
-				return
-			}
-			method = http.MethodGet
-			requestBody = nil
+		client.traverse(ctx, client.originURL.JoinPath("v1", "services", "search"), http.MethodPost, body, maxPages, yield)
+	}
+}
+
+// ContinueSearchPages resumes a traversal from the Next of a page a previous search yielded, so a
+// caller that stopped at its own page budget can pick the sequence up rather than start again.
+func (client *Client) ContinueSearchPages(ctx context.Context, next string, options IterationOptions) iter.Seq2[SearchPage, error] {
+	maxPages, validationError := pageBudget(options.MaxPages)
+	return func(yield func(SearchPage, error) bool) {
+		if validationError != nil {
+			yield(SearchPage{}, validationError)
+			return
 		}
+		target, err := client.continuationURL(next)
+		if err != nil {
+			yield(SearchPage{}, err)
+			return
+		}
+		client.traverse(ctx, target, http.MethodGet, nil, maxPages, yield)
 	}
 }
 
 func (client *Client) SearchServices(ctx context.Context, request SearchRequest, options IterationOptions) iter.Seq2[Service, error] {
-	maxItems := options.MaxItems
-	var validationError error
-	if maxItems < 0 || maxItems > maximumItems {
-		validationError = errors.New("maxItems must be an integer from 1 through 10000")
-	}
 	return func(yield func(Service, error) bool) {
-		if validationError != nil {
-			yield(Service{}, validationError)
+		if options.MaxItems < 0 || options.MaxItems > maximumItems {
+			yield(Service{}, fmt.Errorf("maxItems must be an integer from 1 through %d", maximumItems))
 			return
 		}
-		count := 0
-		for page, err := range client.SearchPages(ctx, request, options) {
-			if err != nil {
-				yield(Service{}, err)
-				return
-			}
-			for _, service := range page.Items {
-				if maxItems != 0 && count >= maxItems {
-					return
-				}
-				count++
-				if !yield(service, nil) {
-					return
-				}
-			}
+		client.services(client.SearchPages(ctx, request, options), options, yield)
+	}
+}
+
+// ContinueSearchServices resumes an item traversal from a page's Next.
+func (client *Client) ContinueSearchServices(ctx context.Context, next string, options IterationOptions) iter.Seq2[Service, error] {
+	return func(yield func(Service, error) bool) {
+		if options.MaxItems < 0 || options.MaxItems > maximumItems {
+			yield(Service{}, fmt.Errorf("maxItems must be an integer from 1 through %d", maximumItems))
+			return
 		}
+		client.services(client.ContinueSearchPages(ctx, next, options), options, yield)
 	}
 }
 
@@ -125,10 +120,12 @@ func (client *Client) SuggestServices(ctx context.Context, request SuggestionReq
 	if request.Limit < 0 || request.Limit > 25 {
 		return nil, errors.New("limit must be an integer from 1 through 25")
 	}
-	target := client.origin + "/v1/services/suggestions?prefix=" + url.QueryEscape(prefix)
+	target := client.originURL.JoinPath("v1", "services", "suggestions")
+	query := url.Values{"prefix": []string{prefix}}
 	if request.Limit != 0 {
-		target += "&limit=" + strconv.Itoa(request.Limit)
+		query.Set("limit", strconv.Itoa(request.Limit))
 	}
+	target.RawQuery = query.Encode()
 	data, err := client.requestJSON(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return nil, err
@@ -136,11 +133,92 @@ func (client *Client) SuggestServices(ctx context.Context, request SuggestionReq
 	return parseSuggestions(data)
 }
 
-func (client *Client) requestJSON(ctx context.Context, method, target string, body []byte) ([]byte, error) {
-	current, err := url.Parse(target)
-	if err != nil {
-		return nil, fmt.Errorf("parse Directory URL: %w", err)
+func pageBudget(requested int) (int, error) {
+	if requested == 0 {
+		return defaultPages, nil
 	}
+	if requested < 1 || requested > maximumPages {
+		return 0, fmt.Errorf("maxPages must be an integer from 1 through %d", maximumPages)
+	}
+	return requested, nil
+}
+
+// traverse walks the continuation chain, yielding each page until the caller stops, the directory
+// stops offering one, or a budget runs out.
+func (client *Client) traverse(ctx context.Context, start *url.URL, method string, body []byte, maxPages int, yield func(SearchPage, error) bool) {
+	current := start
+	requestBody := body
+	visited := map[string]struct{}{}
+	for pageNumber := 0; pageNumber < maxPages; pageNumber++ {
+		data, err := client.requestJSON(ctx, method, current, requestBody)
+		if err != nil {
+			yield(SearchPage{}, err)
+			return
+		}
+		page, err := parseSearchPage(data)
+		if err != nil {
+			yield(SearchPage{}, err)
+			return
+		}
+		if !yield(page, nil) || page.Next == "" {
+			return
+		}
+		// The budget is checked before the continuation is resolved, so the page just yielded
+		// keeps a Next the caller can resume from and no error is raised about a page that was
+		// never going to be requested.
+		if pageNumber+1 >= maxPages {
+			if maxPages == maximumPages {
+				yield(SearchPage{}, fmt.Errorf("Directory pagination exceeded its %d-page traversal limit", maximumPages))
+			}
+			return
+		}
+		next, err := client.continuationURL(page.Next)
+		if err != nil {
+			yield(SearchPage{}, err)
+			return
+		}
+		// A continuation has to advance. Without this a directory that repeats one link keeps the
+		// caller reading the same page until the budget runs out.
+		key := traversalKey(next)
+		if _, seen := visited[key]; seen {
+			yield(SearchPage{}, errors.New("Directory pagination loop detected"))
+			return
+		}
+		visited[key] = struct{}{}
+		current = next
+		method = http.MethodGet
+		requestBody = nil
+	}
+}
+
+func (client *Client) services(pages iter.Seq2[SearchPage, error], options IterationOptions, yield func(Service, error) bool) {
+	count := 0
+	for page, err := range pages {
+		if err != nil {
+			yield(Service{}, err)
+			return
+		}
+		for _, issue := range page.Issues {
+			if options.OnIssue != nil {
+				options.OnIssue(issue)
+			}
+		}
+		for _, service := range page.Items {
+			count++
+			if !yield(service, nil) {
+				return
+			}
+			// Checked after the yield: checking before it lets the enclosing loop pull another
+			// page whenever the budget falls exactly on a page boundary.
+			if options.MaxItems != 0 && count >= options.MaxItems {
+				return
+			}
+		}
+	}
+}
+
+func (client *Client) requestJSON(ctx context.Context, method string, target *url.URL, body []byte) ([]byte, error) {
+	current := target
 	for redirects := 0; ; redirects++ {
 		var requestBody io.Reader
 		if body != nil {
@@ -197,11 +275,11 @@ func (client *Client) consumeResponse(response *http.Response) ([]byte, error) {
 		return nil, errors.New("Directory response exceeds its byte limit")
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		message := string(data)
-		if message == "" {
-			message = fmt.Sprintf("Directory request failed with HTTP %d", response.StatusCode)
+		return nil, &RequestError{
+			Header: response.Header.Clone(), Message: failureMessage(response.Header, data, response.StatusCode),
+			Retryable: response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500,
+			Status:    response.StatusCode,
 		}
-		return nil, &RequestError{Header: response.Header.Clone(), Message: message, Status: response.StatusCode}
 	}
 	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if err != nil || !strings.EqualFold(mediaType, "application/json") {
@@ -222,21 +300,83 @@ func (client *Client) consumeResponse(response *http.Response) ([]byte, error) {
 	return data, nil
 }
 
-func (client *Client) continuationURL(reference string) (string, error) {
-	base, _ := url.Parse(client.origin)
-	resolved, err := base.Parse(reference)
+// failureMessage describes a failed request without repeating whatever the response happened to
+// contain. Only a structured field of a JSON error document is quoted, and only after the control
+// characters that would let it forge a log line or drive a terminal are removed.
+func failureMessage(header http.Header, data []byte, status int) string {
+	summary := fmt.Sprintf("Directory request failed with HTTP %d", status)
+	mediaType, _, err := mime.ParseMediaType(header.Get("Content-Type"))
+	if err != nil || (!strings.EqualFold(mediaType, "application/json") && !strings.EqualFold(mediaType, "application/problem+json")) {
+		return summary
+	}
+	if len(data) > maximumErrorBytes {
+		data = data[:maximumErrorBytes]
+	}
+	var document struct {
+		Detail  string `json:"detail"`
+		Message string `json:"message"`
+		Title   string `json:"title"`
+	}
+	if json.Unmarshal(data, &document) != nil {
+		return summary
+	}
+	for _, candidate := range []string{document.Detail, document.Title, document.Message} {
+		detail := printableText(candidate)
+		if detail == "" {
+			continue
+		}
+		if runes := []rune(detail); len(runes) > maximumErrorRunes {
+			detail = string(runes[:maximumErrorRunes]) + "…"
+		}
+		return summary + ": " + detail
+	}
+	return summary
+}
+
+func printableText(value string) string {
+	cleaned := strings.Map(func(character rune) rune {
+		if character < 0x20 || character == 0x7f || (character >= 0x80 && character <= 0x9f) {
+			return ' '
+		}
+		return character
+	}, value)
+	return strings.Join(strings.Fields(cleaned), " ")
+}
+
+func (client *Client) continuationURL(reference string) (*url.URL, error) {
+	resolved, err := client.originURL.Parse(reference)
 	if err != nil {
-		return "", fmt.Errorf("parse Directory continuation: %w", err)
+		return nil, fmt.Errorf("parse Directory continuation: %w", err)
 	}
 	if !client.sameOrigin(resolved) {
-		return "", errors.New("Directory continuation must remain on the canonical origin")
+		return nil, errors.New("Directory continuation must remain on the canonical origin")
 	}
-	return resolved.String(), nil
+	return resolved, nil
 }
 
 func (client *Client) sameOrigin(candidate *url.URL) bool {
-	origin, err := url.Parse(client.origin)
-	return err == nil && candidate.User == nil && strings.EqualFold(candidate.Scheme, origin.Scheme) && strings.EqualFold(candidate.Host, origin.Host)
+	return candidate.User == nil && canonicalOrigin(candidate) == canonicalOrigin(client.originURL)
+}
+
+// canonicalOrigin renders an origin the way two spellings of the same one compare equal: lowercase
+// host, and no port when it is the default for the scheme.
+func canonicalOrigin(value *url.URL) string {
+	scheme := strings.ToLower(value.Scheme)
+	host := strings.ToLower(value.Hostname())
+	port := value.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		host = net.JoinHostPort(host, port)
+	}
+	return scheme + "://" + host
+}
+
+// traversalKey identifies a page for loop detection, so alternating the case of the host or the
+// spelling of an escape cannot present one page as two.
+func traversalKey(value *url.URL) string {
+	return canonicalOrigin(value) + value.EscapedPath() + "?" + value.Query().Encode()
 }
 
 func redirectStatus(status int) bool {

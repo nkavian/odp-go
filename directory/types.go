@@ -4,6 +4,7 @@ package directory
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"time"
 
 	odp "github.com/offering-protocol/odp-go"
@@ -54,6 +55,9 @@ type SearchRequest struct {
 type IterationOptions struct {
 	MaxItems int
 	MaxPages int
+	// OnIssue, when set, is called for each record a page carried that could not be used. Without
+	// it an item traversal cannot tell a page of unusable records from a page of no matches.
+	OnIssue func(Issue)
 }
 
 type Service struct {
@@ -95,8 +99,23 @@ type PaymentOptionFacetValue struct {
 type SearchPage struct {
 	Additional odp.AdditionalMembers
 	Facets     *Facets
-	Items      []Service
-	Next       string
+	// Issues reports records this page carried that could not be used. They are reported rather
+	// than raised because a directory is not an ODP protocol role: one unusable record says
+	// nothing about the rest of the page.
+	Issues []Issue
+	Items  []Service
+	Next   string
+}
+
+type IssueScope string
+
+const IssueService IssueScope = "service"
+
+// Issue describes one Directory record this client discarded, and why.
+type Issue struct {
+	Index   int
+	Message string
+	Scope   IssueScope
 }
 
 type SuggestionRequest struct {
@@ -105,9 +124,10 @@ type SuggestionRequest struct {
 }
 
 type RequestError struct {
-	Header  http.Header
-	Message string
-	Status  int
+	Header    http.Header
+	Message   string
+	Retryable bool
+	Status    int
 }
 
 func (err *RequestError) Error() string {
@@ -117,19 +137,28 @@ func (err *RequestError) Error() string {
 type Client struct {
 	environment Environment
 	httpClient  *http.Client
-	origin      string
+	originURL   *url.URL
 }
 
 func (client *Client) Environment() Environment {
 	return client.environment
 }
 
+// cloneAdditional copies the members a caller may keep, leaving the source map untouched.
 func cloneAdditional(object map[string]json.RawMessage, known ...string) odp.AdditionalMembers {
+	excluded := make(map[string]struct{}, len(known))
 	for _, name := range known {
-		delete(object, name)
+		excluded[name] = struct{}{}
 	}
-	if len(object) == 0 {
+	result := odp.AdditionalMembers{}
+	for name, value := range object {
+		if _, found := excluded[name]; found {
+			continue
+		}
+		result[name] = value
+	}
+	if len(result) == 0 {
 		return nil
 	}
-	return object
+	return result
 }

@@ -55,9 +55,47 @@ for page, err := range directoryClient.SearchPages(ctx, request, directory.Itera
 }
 ```
 
-Opaque continuation links are followed with `GET` on the selected canonical origin. Traversal is
-limited to 16 pages by default and at most 10,000 results when `MaxItems` is configured. Stopping
-iteration stops network activity.
+Opaque continuation links are followed with `GET` on the selected canonical origin. A continuation
+that leaves that origin, repeats a page already visited, or cannot be resolved ends the traversal
+with an error. Stopping iteration stops network activity.
+
+`IterationOptions.MaxPages` is the caller's page budget and defaults to 16. Reaching it ends the
+sequence without an error, and the last page keeps the `Next` that `ContinueSearchPages` or
+`ContinueSearchServices` resumes from:
+
+```go
+var resume string
+for page, err := range directoryClient.SearchPages(ctx, request, directory.IterationOptions{MaxPages: 4}) {
+	if err != nil {
+		return err
+	}
+	consume(page.Items, page.Facets)
+	resume = page.Next
+}
+if resume != "" {
+	for page, err := range directoryClient.ContinueSearchPages(ctx, resume, directory.IterationOptions{}) {
+		// ...
+	}
+}
+```
+
+A budget above 10,000 pages is rejected, and a directory that offers a continuation for 10,000
+consecutive pages ends the traversal with an error rather than quietly appearing exhausted.
+`MaxItems` bounds `SearchServices` at up to 10,000 results.
+
+## Malformed results
+
+One unusable record does not discard the page it arrived on. A record that fails validation is
+omitted from `Items` and reported in `SearchPage.Issues` with its index and the reason;
+`IterationOptions.OnIssue` receives the same reports while iterating Services:
+
+```go
+options := directory.IterationOptions{OnIssue: func(issue directory.Issue) {
+	log.Printf("directory %s result %d: %s", issue.Scope, issue.Index, issue.Message)
+}}
+```
+
+A malformed page envelope, by contrast, still fails the traversal.
 
 ## Suggestions
 
@@ -81,6 +119,8 @@ directoryClient, err := directory.New(directory.Options{
 `Options.HTTPClient` permits transport policy and test injection while preserving the selected
 canonical origin. The client accepts up to five same-origin redirects, bounds response bodies, and
 returns non-success responses as `*directory.RequestError` with the status and response headers.
+`RequestError.Retryable` marks the 429 and 5xx statuses worth retrying, and `Message` quotes only a
+structured field of a JSON error document, stripped of control characters and clamped in length.
 
 Directory results filter unrecognized enrollment, payment, and trust descriptors while preserving
 recognized, validated protocol capabilities.

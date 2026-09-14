@@ -9,10 +9,10 @@ import (
 )
 
 func TestParseOfferingPageValidatesItemsAndRepresentation(t *testing.T) {
-	if _, err := parseOfferingPage([]byte(`{"odp_version":"1.0","items":[{"id":"gpu"}]}`), false, odp.RepresentationTerse); err == nil {
+	if _, err := parseOfferingPage([]byte(`{"odp_version":"1.0","items":[{"id":"gpu"}]}`), false, odp.RepresentationTerse, refinementPolicy{}); err == nil {
 		t.Fatal("invalid Offering item passed validation")
 	}
-	if _, err := parseOfferingPage([]byte(`{"odp_version":"1.0","items":[{"detail_fields":["memory"],"id":"gpu","name":"GPU"}]}`), false, odp.RepresentationFull); err == nil || !strings.Contains(err.Error(), "detail_fields") {
+	if _, err := parseOfferingPage([]byte(`{"odp_version":"1.0","items":[{"detail_fields":["memory"],"id":"gpu","name":"GPU"}]}`), false, odp.RepresentationFull, refinementPolicy{}); err == nil || !strings.Contains(err.Error(), "detail_fields") {
 		t.Fatalf("full representation error = %v", err)
 	}
 	items := make([]odp.Offering, 101)
@@ -23,7 +23,7 @@ func TestParseOfferingPageValidatesItemsAndRepresentation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := parseOfferingPage(data, false, odp.RepresentationTerse); err == nil {
+	if _, err := parseOfferingPage(data, false, odp.RepresentationTerse, refinementPolicy{}); err == nil {
 		t.Fatalf("page-size error = %v", err)
 	}
 }

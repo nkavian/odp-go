@@ -4,6 +4,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"net/http"
 	"time"
@@ -13,9 +14,12 @@ import (
 )
 
 const (
-	ServiceDocumentFallback = 4 * time.Hour
-	CollectionFallback      = time.Hour
-	OfferingFallback        = 5 * time.Minute
+	AttributeSchemaFallback      = 24 * time.Hour
+	CapabilityDefinitionFallback = time.Hour
+	CollectionFallback           = time.Hour
+	OfferingFallback             = 5 * time.Minute
+	SearchFallback               = 0
+	ServiceDocumentFallback      = 4 * time.Hour
 )
 
 type Freshness string
@@ -42,10 +46,15 @@ type Inspection struct {
 	ServiceOrigin string
 }
 
+// CacheFallbacks holds the freshness lifetime applied to each resource class when a response
+// carries no explicit HTTP freshness. The draft requires every class to be configurable on its own.
 type CacheFallbacks struct {
-	Collection      time.Duration
-	Offering        time.Duration
-	ServiceDocument time.Duration
+	AttributeSchema      time.Duration
+	CapabilityDefinition time.Duration
+	Collection           time.Duration
+	Offering             time.Duration
+	Search               time.Duration
+	ServiceDocument      time.Duration
 }
 
 type CacheRecord struct {
@@ -207,7 +216,10 @@ func (err *RequestError) Error() string {
 	if err.Problem != nil && err.Problem.Title != "" {
 		return err.Problem.Title
 	}
-	return http.StatusText(err.Status)
+	if text := http.StatusText(err.Status); text != "" {
+		return text
+	}
+	return fmt.Sprintf("ODP request failed with HTTP %d", err.Status)
 }
 
 type ServiceClientFactory func(context.Context, directory.Service) (*ServiceClient, error)
