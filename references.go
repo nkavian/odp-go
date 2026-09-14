@@ -100,9 +100,13 @@ func ResolveContinuation(reference, serviceOrigin string) (*url.URL, error) {
 }
 
 func canonicalOrigin(value *url.URL) (string, error) {
-	host, err := idna.Lookup.ToASCII(value.Hostname())
-	if err != nil {
-		return "", fmt.Errorf("normalize ODP host: %w", err)
+	host := value.Hostname()
+	if net.ParseIP(host) == nil {
+		var err error
+		host, err = idna.Lookup.ToASCII(host)
+		if err != nil {
+			return "", fmt.Errorf("normalize ODP host: %w", err)
+		}
 	}
 	host = strings.ToLower(host)
 	if strings.Contains(host, ":") {

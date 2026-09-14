@@ -278,7 +278,8 @@ func normalizeBranding(document map[string]any) {
 		image, imageOK := branding[member].(map[string]any)
 		imageType, typeOK := image["type"].(string)
 		if imageOK && typeOK && imageType != "image/png" && imageType != "image/svg+xml" && imageType != "image/webp" {
-			delete(branding, member)
+			delete(document, "branding")
+			return
 		} else if imageOK {
 			for key := range image {
 				if key != "src" && key != "type" {
@@ -691,6 +692,9 @@ func issue(path, keyword, message string) ValidationIssue {
 }
 
 func validLanguageTag(value string) bool {
+	if strings.Contains(value, "_") {
+		return false
+	}
 	if _, err := language.Parse(value); err != nil {
 		return false
 	}

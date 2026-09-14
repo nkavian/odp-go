@@ -196,6 +196,18 @@ func TestOpenAPIDocumentsAreValidatedBeforeUse(t *testing.T) {
 	}
 }
 
+func TestOpenAPIPathExtensionsDoNotHideOperations(t *testing.T) {
+	document := strings.Replace(openAPIDocument, `"paths":{`, `"paths":{"x-summary":"Catalog operations",`, 1)
+	client, base := enrichmentClient(t, offeringJSON(""), "", map[string]string{"/openapi.json": document})
+	resolved, operation, err := client.resolveOpenAPI(t.Context(), base+"/openapi.json", "rent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operation["operationId"] != "rent" || resolved["paths"].(map[string]any)["x-summary"] != "Catalog operations" {
+		t.Fatalf("resolved wrong operation or lost extension: %#v, %#v", resolved, operation)
+	}
+}
+
 func TestAttributeSchemaGraphLimits(t *testing.T) {
 	documents := map[string]string{}
 	// A chain deeper than the eight reference levels the protocol allows.
