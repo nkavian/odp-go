@@ -1,9 +1,24 @@
 package agent
 
 import (
+	"net/http"
 	"net/netip"
 	"testing"
 )
+
+func TestSecureDialRejectsMissingPort(t *testing.T) {
+	client := secureHTTPClient(false)
+	transport := client.Transport.(*http.Transport)
+	t.Cleanup(transport.CloseIdleConnections)
+	connection, err := transport.DialContext(t.Context(), "tcp", "example.com")
+	if connection != nil {
+		connection.Close()
+		t.Fatal("malformed address opened a connection")
+	}
+	if err == nil {
+		t.Fatal("accepted address without a port")
+	}
+}
 
 func TestPublicAddressClassification(t *testing.T) {
 	tests := []struct {
