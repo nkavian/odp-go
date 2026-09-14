@@ -41,8 +41,8 @@ for candidate, err := range directoryClient.SearchServices(ctx, request, directo
 
 Options within one payment filter are alternatives. The example matches Services that accept either
 InFlow or Solana through MPP. A protocol-only `PaymentFilter{Name: odp.ProtocolMPP}` matches any
-Service that advertises MPP. `Facets.Payments` reports protocol counts and `Facets.PaymentOptions`
-reports each protocol-option count independently.
+Service that advertises MPP. `Facets.Payments` reports protocol counts, `Facets.PaymentOptions`
+reports each protocol-option count independently, and `Facets.Trust` reports trust protocol counts.
 
 Use `SearchPages` when facet counts or page-level additive members are needed:
 
