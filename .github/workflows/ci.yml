@@ -16,8 +16,8 @@ jobs:
       fail-fast: false
       matrix:
         go:
-          - 1.25.x
           - 1.26.x
+          - 1.27.x
     steps:
       - uses: actions/checkout@v7
 
@@ -44,7 +44,7 @@ jobs:
           ODP_SPECS_DIR: .conformance/odp-specs
 
       - name: Upload conformance reports
-        if: matrix.go == '1.25.x'
+        if: matrix.go == '1.26.x'
         uses: actions/upload-artifact@v7
         with:
           name: odp-go-conformance

@@ -1,6 +1,6 @@
 module github.com/offering-protocol/odp-go
 
-go 1.25.7
+go 1.26.0
 
 require (
 	github.com/dlclark/regexp2 v1.12.0

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/offering-protocol/odp-go/actions/workflows/ci.yml/badge.svg)](https://github.com/offering-protocol/odp-go/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/offering-protocol/odp-go.svg)](https://pkg.go.dev/github.com/offering-protocol/odp-go)
-[![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 Official Go software development kit for the
@@ -191,7 +191,7 @@ advertises its ODP operations as not requiring authentication.
 
 ## Development
 
-Go 1.25 or newer and an `odp-specs` checkout are required. Set `ODP_SPECS_DIR` when the
+Go 1.26 or newer and an `odp-specs` checkout are required. Set `ODP_SPECS_DIR` when the
 specifications are not checked out beside this repository. Run the complete merge gate with:
 
 ```sh
