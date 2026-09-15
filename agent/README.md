@@ -154,6 +154,11 @@ of Service credentials. Attribute Schemas use a 24-hour fallback freshness, whil
 require explicit HTTP freshness metadata. Cross-document schema composition uses `$ref`;
 `$dynamicRef` accepts only a fragment reference such as `#node`.
 
+Attribute Schema processing is limited to 256 KiB per document, 16 documents, eight reference
+levels, and one MiB for the complete graph. OpenAPI documents are limited to one MiB and 32 JSON
+nesting levels. These are SDK safety ceilings. Callers can impose a shorter processing deadline
+through the operation's `context.Context` but cannot raise the ceilings.
+
 ## Discover Offerings across Services
 
 `Agent` searches Services through the canonical directory, then queries each selected Service with
