@@ -1,8 +1,8 @@
 # ODP directory package
 
-Package `directory` searches indexed Services and submitted Collections. It does not crawl
-catalogs or index Offerings. After discovery, an Agent inspects each result's live ODP document and
-queries that Service's Collections and Offerings.
+Package `directory` searches indexed Services and Collections from ODP and OpenAPI sources. It does
+not crawl catalogs or index Offerings. Each mixed result identifies its exact discovery document.
+The Agent package navigates ODP catalogs only; it does not execute OpenAPI operations.
 
 The production origin is fixed at `https://api.inflowpay.ai`. Select `Sandbox` to use
 the fixed `https://sandbox.inflowpay.ai` environment. Callers cannot configure another
@@ -26,7 +26,8 @@ for result, err := range search.Items {
 	}
 	switch result.Type {
 	case "service":
-		fmt.Printf("Service: %s (%s)\n", result.Service.Name, result.Service.ServiceOrigin)
+		fmt.Printf("Service: %s (%s), source: %s\n", result.Service.Name,
+			result.Service.Source.Type, result.Service.Source.URL)
 	case "collection":
 		fmt.Printf("Collection: %s, ID %s, through %s\n",
 			result.Collection.Name, result.Collection.ID, result.Service.ServiceOrigin)
@@ -39,8 +40,27 @@ for result, err := range search.Items {
 Omit `Types` to select both types, or provide `Types: []string{"collection"}` or `[]string{"service"}`.
 The list must be nonempty and distinct. Filters apply to the owning Service for either type.
 
-A Collection is identified by its owning Service origin and case-sensitive `Collection.ID`.
-Inspect that Service, then call the Agent client's `GetCollection` with the ID.
+A result's `Service.ServiceID` identifies the indexed Service. Several source documents can share
+an API origin, so the origin alone does not identify an imported Service. `Service.Source.URL`
+preserves the exact document path and query; it can be hosted on a different origin from the API.
+
+Check `Service.Source.Type` before choosing the next operation:
+
+- `SourceODP`: inspect the Service's live ODP document. For a Collection, call the Agent client's
+  `GetCollection` with the case-sensitive `Collection.ID`.
+- `SourceOpenAPI`: read `Service.Source.URL` with an OpenAPI-aware client. A Collection ID identifies
+  a Directory presentation group, not an ODP Collection endpoint. Its source is the parent's document.
+- Any other value: display the metadata or report an unsupported source. Do not assume ODP.
+
+`Source.X402Discovery` means that a supporting fixed-path x402 discovery document was detected.
+It does not prove that an operation accepts payment or that the caller can execute it. Imported
+description, language and localizations may be absent; their Go values are empty strings or nil
+slices. Imported results do not populate ODP `Operations`. Native ODP results retain their required
+metadata validation. `SearchServices` returns native ODP Services only.
+
+Mixed search requires the Directory's source-aware response format. A missing or empty source URL
+is reported as a record issue; the client does not infer a document URL from the API origin.
+
 `Result.IndexedAt` reports Collection freshness; `Result.Service.IndexedAt` reports its parent's
 freshness. A Service may have `AvailableThrough` platform attribution. A Collection's attribution
 is its owning `Service`.
@@ -49,6 +69,25 @@ Unknown types retain the wire type in `Type` and complete JSON in `Raw`; their `
 `Collection` pointers are nil. Do not treat them as Services. Known types are validated and
 retain additive metadata in `Additional`. Nested Service parsing omits unverified execution
 metadata such as endpoint paths, just as Service-only search does.
+
+Filter mixed search or suggestions by source using the same `ServiceFilters`:
+
+```go
+filters := &directory.ServiceFilters{
+	Sources: []directory.SourceType{directory.SourceOpenAPI},
+}
+search := directoryClient.Search(ctx, directory.DirectorySearchRequest{
+	SearchRequest: directory.SearchRequest{Query: "weather", Filters: filters},
+}, directory.IterationOptions{})
+names, err := directoryClient.Suggest(ctx, directory.SuggestionRequest{
+	Prefix: "weather", Filters: filters,
+})
+```
+
+Omit `Sources` for all sources. A supplied list must contain one or two distinct values from
+`SourceODP` and `SourceOpenAPI`. Values within the list are alternatives; other filter categories
+are combined with it. Collection filters use the owning Service's source. Source filters do not
+make native `SearchServices` return OpenAPI entries.
 
 The mixed endpoint returns at most 100 results (also its default limit), without continuation.
 An absent `Next` does not promise that all matches were returned; refine the query or filters.
@@ -176,7 +215,7 @@ names, err := directoryClient.Suggest(ctx, directory.SuggestionRequest{
 ```
 
 `Suggest` sends POST `/v1/directory/suggestions`. Its optional `Filters` use the same
-structure as search, including AEP, keywords, ODP operations, payments and trust.
+structure as search, including AEP, keywords, ODP operations, payments, sources and trust.
 Collection filters apply to the owning Service; the output remains names only.
 
 `SuggestServices` uses GET and retains keyword-prefix suggestions for Service-only discovery.

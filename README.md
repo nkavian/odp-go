@@ -136,7 +136,11 @@ for candidate, err := range directoryClient.SearchServices(ctx, directory.Search
 ```
 
 Use `Search` and `ContinueSearch` for mixed Service/Collection results, or `SearchServices` and
-`ContinueSearchServices` for Service-only discovery. Each returns independent `Items` and
+`ContinueSearchServices` for native ODP Service-only discovery. Mixed results include
+`Service.Source.Type` and the exact `Service.Source.URL`: check the type before using an ODP Agent
+client. OpenAPI Collections are Directory groups, not ODP operation targets. `ServiceFilters.Sources`
+restricts both mixed search and suggestions to `SourceODP` or `SourceOpenAPI`; omit it for all sources.
+Each search returns independent `Items` and
 `Responses` iterators. `Suggest` returns matching target names; `SuggestServices` provides
 Service-only keyword suggestions. Mixed search is capped at 100 results without continuation;
 refine the query rather than assuming every match was returned.
