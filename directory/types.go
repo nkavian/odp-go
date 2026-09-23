@@ -33,6 +33,7 @@ type ServiceFilters struct {
 	Keywords   []string                 `json:"keywords,omitempty"`
 	Operations []OperationFilter        `json:"operations,omitempty"`
 	Payments   []PaymentFilter          `json:"payments,omitempty"`
+	Sources    []SourceType             `json:"sources,omitempty"`
 	Trust      []odp.TrustProtocol      `json:"trust,omitempty"`
 }
 
@@ -58,9 +59,27 @@ type DirectorySearchRequest struct {
 	Types []string `json:"types,omitempty"`
 }
 
+// IndexedService carries Directory metadata. Check Source.Type before using an ODP Agent client;
+// imported Services may omit description, language, localizations and operations.
 type IndexedService struct {
 	Service
 	ServiceID string
+	Source    Source
+}
+
+type SourceType string
+
+const (
+	SourceODP     SourceType = "odp"
+	SourceOpenAPI SourceType = "openapi"
+)
+
+// Source identifies the discovery document, not an endpoint to invoke.
+type Source struct {
+	Additional    odp.AdditionalMembers
+	Type          SourceType
+	URL           string
+	X402Discovery bool
 }
 
 type ServiceReference struct {

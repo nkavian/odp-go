@@ -54,6 +54,10 @@ func main() {
 		case "service":
 			fmt.Printf("Directory Service: %s\n", result.Service.Name)
 		case "collection":
+			if result.Service.Source.Type != directory.SourceODP {
+				fmt.Printf("Directory group: %s, source: %s\n", result.Collection.Name, result.Service.Source.URL)
+				continue
+			}
 			full, err := mock.serviceClients[result.Service.ServiceOrigin].GetCollection(ctx, result.Collection.ID, "full")
 			if err != nil {
 				log.Fatal(err)

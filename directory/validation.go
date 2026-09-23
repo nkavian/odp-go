@@ -68,6 +68,16 @@ func normalizedSearchRequest(request SearchRequest) (SearchRequest, error) {
 }
 
 func validateFilters(filters ServiceFilters) (ServiceFilters, error) {
+	if filters.Sources != nil {
+		if len(filters.Sources) == 0 || len(filters.Sources) > 2 || !unique(filters.Sources) {
+			return ServiceFilters{}, errors.New("sources must contain distinct odp or openapi values")
+		}
+		for _, source := range filters.Sources {
+			if source != SourceODP && source != SourceOpenAPI {
+				return ServiceFilters{}, errors.New("sources must contain distinct odp or openapi values")
+			}
+		}
+	}
 	keywords, err := uniqueText(filters.Keywords, "keywords", 32, 64)
 	if err != nil {
 		return ServiceFilters{}, err
@@ -88,7 +98,7 @@ func validateFilters(filters ServiceFilters) (ServiceFilters, error) {
 	if err != nil {
 		return ServiceFilters{}, err
 	}
-	return ServiceFilters{Enrollment: enrollment, Keywords: keywords, Operations: operationFilters, Payments: paymentFilters, Trust: trust}, nil
+	return ServiceFilters{Enrollment: enrollment, Keywords: keywords, Operations: operationFilters, Payments: paymentFilters, Sources: filters.Sources, Trust: trust}, nil
 }
 
 func parseSearchPage(data []byte) (SearchResponse[Service], error) {

@@ -108,15 +108,10 @@ func parseResult(data []byte) (Result, error) {
 	if kind != "service" && kind != "collection" {
 		return Result{Type: kind, Raw: append(json.RawMessage(nil), data...)}, nil
 	}
-	service, err := parseService(object["service"])
+	service, err := parseIndexedService(object["service"])
 	if err != nil {
 		return Result{}, err
 	}
-	serviceID, err := requiredText(service.Additional["service_id"], "service_id", 1, 128)
-	if err != nil {
-		return Result{}, err
-	}
-	delete(service.Additional, "service_id")
 	stamp, err := requiredText(object["indexed_at"], "indexed_at", 1, 64)
 	if err != nil {
 		return Result{}, err
@@ -125,7 +120,7 @@ func parseResult(data []byte) (Result, error) {
 	if err != nil {
 		return Result{}, errors.New("indexed_at must be a date-time")
 	}
-	result := Result{Type: kind, Service: &IndexedService{Service: service, ServiceID: serviceID}, IndexedAt: indexedAt}
+	result := Result{Type: kind, Service: &service, IndexedAt: indexedAt}
 	if kind == "service" {
 		result.Additional = cloneAdditional(object, "type", "service", "indexed_at", "available_through")
 		if raw, present := object["available_through"]; present {

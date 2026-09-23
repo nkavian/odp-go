@@ -22,6 +22,7 @@ type mockDirectory struct {
 }
 
 type directoryServiceJSON struct {
+	Source        *directorySourceJSON      `json:"source,omitempty"`
 	ServiceID     string                    `json:"service_id"`
 	Description   string                    `json:"description"`
 	IndexedAt     string                    `json:"indexed_at"`
@@ -32,6 +33,12 @@ type directoryServiceJSON struct {
 	Operations    []odp.OperationDescriptor `json:"operations"`
 	Protocols     *odp.ServiceProtocols     `json:"protocols,omitempty"`
 	ServiceOrigin string                    `json:"service_origin"`
+}
+
+type directorySourceJSON struct {
+	Type          string `json:"type"`
+	URL           string `json:"url"`
+	X402Discovery bool   `json:"x402_discovery"`
 }
 
 func createMockDirectory(ctx context.Context, candidates []string) (*mockDirectory, error) {
@@ -64,6 +71,7 @@ func createMockDirectory(ctx context.Context, candidates []string) (*mockDirecto
 			Operations: document.Operations, Protocols: document.Protocols, ServiceOrigin: origin,
 		}
 		wireServices = append(wireServices, wireService)
+		wireService.Source = &directorySourceJSON{Type: "odp", URL: origin + "/.well-known/odp"}
 		wireResults = append(wireResults, map[string]any{"type": "service", "service": wireService, "indexed_at": wireService.IndexedAt})
 		anonymous := map[odp.Operation]bool{}
 		for _, operation := range document.Operations {

@@ -18,6 +18,7 @@ func mixedResult(kind string) map[string]any {
 		panic(err)
 	}
 	service["service_id"] = "ca0304cc-ab28-43e5-af94-7bdf11b40c6e"
+	service["source"] = map[string]any{"type": "odp", "url": "https://compute.example/.well-known/odp", "x402_discovery": false}
 	result := map[string]any{"type": kind, "service": service, "indexed_at": "2026-09-18T12:00:00Z"}
 	if kind == "collection" {
 		result["collection"] = map[string]any{"id": "Weather", "name": "Weather forecasts", "description": "Forecasts and conditions."}
@@ -96,6 +97,7 @@ func TestMixedSearchRejectsMalformedKnownEntries(t *testing.T) {
 	mutations := []func(map[string]any){
 		func(v map[string]any) { v["type"] = "" },
 		func(v map[string]any) { v["service"] = nil },
+		func(v map[string]any) { v["service"] = true },
 		func(v map[string]any) { delete(v["service"].(map[string]any), "service_id") },
 		func(v map[string]any) { v["indexed_at"] = "yesterday" },
 		func(v map[string]any) { delete(v, "indexed_at") },
