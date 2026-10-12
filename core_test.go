@@ -83,7 +83,7 @@ func TestServiceDocumentParsesPaymentOptions(t *testing.T) {
 	if document.Protocols == nil || len(document.Protocols.Payments) != 1 || len(document.Protocols.Payments[0].Options) != 3 || document.Protocols.Payments[0].Options[1] != odp.PaymentOptionInflow {
 		t.Fatalf("document = %#v", document)
 	}
-	if !odp.IsPaymentOption(odp.PaymentOptionBase) || odp.IsPaymentOption("future-option") {
+	if !odp.IsPaymentOption(odp.PaymentOptionArc) || !odp.IsPaymentOption(odp.PaymentOptionMonad) || !odp.IsPaymentOption(odp.PaymentOptionBase) || odp.IsPaymentOption("future-option") {
 		t.Fatal("payment option vocabulary mismatch")
 	}
 }

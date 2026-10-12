@@ -430,9 +430,9 @@ func filterPaymentOptions(document map[string]any) {
 		return
 	}
 	recognized := map[string]bool{
-		"algorand": true, "aptos": true, "arbitrum": true, "avalanche": true,
+		"algorand": true, "aptos": true, "arbitrum": true, "arc": true, "avalanche": true,
 		"base": true, "card": true, "ethereum": true, "hedera": true, "inflow": true,
-		"lightning": true, "polygon": true, "solana": true, "stellar": true,
+		"lightning": true, "monad": true, "polygon": true, "solana": true, "stellar": true,
 		"stripe": true, "tempo": true, "ton": true,
 	}
 	for _, payment := range payments {
