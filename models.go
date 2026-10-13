@@ -91,6 +91,7 @@ const (
 	PaymentOptionAlgorand  PaymentOption = "algorand"
 	PaymentOptionAptos     PaymentOption = "aptos"
 	PaymentOptionArbitrum  PaymentOption = "arbitrum"
+	PaymentOptionArc       PaymentOption = "arc"
 	PaymentOptionAvalanche PaymentOption = "avalanche"
 	PaymentOptionBase      PaymentOption = "base"
 	PaymentOptionCard      PaymentOption = "card"
@@ -98,6 +99,7 @@ const (
 	PaymentOptionHedera    PaymentOption = "hedera"
 	PaymentOptionInflow    PaymentOption = "inflow"
 	PaymentOptionLightning PaymentOption = "lightning"
+	PaymentOptionMonad     PaymentOption = "monad"
 	PaymentOptionPolygon   PaymentOption = "polygon"
 	PaymentOptionSolana    PaymentOption = "solana"
 	PaymentOptionStellar   PaymentOption = "stellar"
@@ -108,9 +110,9 @@ const (
 
 func IsPaymentOption(value PaymentOption) bool {
 	switch value {
-	case PaymentOptionAlgorand, PaymentOptionAptos, PaymentOptionArbitrum, PaymentOptionAvalanche,
+	case PaymentOptionAlgorand, PaymentOptionAptos, PaymentOptionArbitrum, PaymentOptionArc, PaymentOptionAvalanche,
 		PaymentOptionBase, PaymentOptionCard, PaymentOptionEthereum, PaymentOptionHedera,
-		PaymentOptionInflow, PaymentOptionLightning, PaymentOptionPolygon, PaymentOptionSolana,
+		PaymentOptionInflow, PaymentOptionLightning, PaymentOptionMonad, PaymentOptionPolygon, PaymentOptionSolana,
 		PaymentOptionStellar, PaymentOptionStripe, PaymentOptionTempo, PaymentOptionTON:
 		return true
 	default:

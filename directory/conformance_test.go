@@ -352,6 +352,24 @@ func TestFacetMembersAreCheckedByName(t *testing.T) {
 	}
 }
 
+func TestArcAndMonadPaymentOptions(t *testing.T) {
+	for _, option := range []odp.PaymentOption{odp.PaymentOptionArc, odp.PaymentOptionMonad} {
+		t.Run(string(option), func(t *testing.T) {
+			payment := fmt.Sprintf(`{"authentication":"not-required","name":"x402","options":[%q]}`, option)
+			body := fmt.Sprintf(`{"items":[%s],"facets":{"payments":[{"count":1,"value":%s}],"payment_options":[{"count":1,"value":{"name":"x402","option":%q}}]}}`, recordWith(`"protocols":{"payments":[`+payment+`]}`), payment, option)
+			client := serve(t, always(body))
+			request := directory.SearchRequest{Filters: &directory.ServiceFilters{Payments: []directory.PaymentFilter{{Name: odp.ProtocolX402, Options: []odp.PaymentOption{option}}}}}
+			pages, err := collectPages(client.SearchServices(t.Context(), request, directory.IterationOptions{}).Responses)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(pages) != 1 || len(pages[0].Items) != 1 || pages[0].Items[0].Protocols.Payments[0].Options[0] != option || pages[0].Facets.Payments[0].Value.Options[0] != option || pages[0].Facets.PaymentOptions[0].Value.Option != option {
+				t.Fatalf("payment metadata = %#v", pages)
+			}
+		})
+	}
+}
+
 func TestFacetShapesAreValidated(t *testing.T) {
 	cases := map[string]string{
 		"facets not an object":   `{"items":[],"facets":[]}`,

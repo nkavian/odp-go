@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	odp "github.com/offering-protocol/odp-go"
 	"github.com/offering-protocol/odp-go/directory"
 )
 
@@ -260,9 +261,12 @@ func TestMixedSuggestionsFilters(t *testing.T) {
 		if request.Method != "POST" || request.Header.Get("Content-Type") != "application/json" || payload.Filters == nil || strings.Join(payload.Filters.Keywords, ",") != "weather" {
 			t.Fatalf("request=%s payload=%+v", request.Method, payload)
 		}
+		if len(payload.Filters.Payments) != 1 || len(payload.Filters.Payments[0].Options) != 2 || payload.Filters.Payments[0].Options[0] != odp.PaymentOptionArc || payload.Filters.Payments[0].Options[1] != odp.PaymentOptionMonad {
+			t.Fatalf("payment filters=%+v", payload.Filters.Payments)
+		}
 		return response(200, `{"items":["Weather"]}`, nil), nil
 	}, directory.Production)
-	filters := &directory.ServiceFilters{Keywords: []string{"weather"}}
+	filters := &directory.ServiceFilters{Keywords: []string{"weather"}, Payments: []directory.PaymentFilter{{Name: odp.ProtocolMPP, Options: []odp.PaymentOption{odp.PaymentOptionArc, odp.PaymentOptionMonad}}}}
 	if _, err := value.Suggest(t.Context(), directory.SuggestionRequest{Prefix: "we", Filters: filters}); err != nil {
 		t.Fatal(err)
 	}
