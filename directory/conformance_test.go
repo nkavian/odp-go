@@ -196,9 +196,9 @@ func TestContinuationsMustAdvanceAndStayOnOrigin(t *testing.T) {
 		"repeats itself":   {next: "/v1/services/search", wantErr: "loop"},
 		"another origin":   {next: "https://evil.example/v1", wantErr: "canonical origin"},
 		"scheme relative":  {next: "//evil.example/v1", wantErr: "canonical origin"},
-		"carries userinfo": {next: "https://user@api.inflowpay.ai/v1", wantErr: "canonical origin"},
-		"alternating case": {next: "https://API.INFLOWPAY.AI/v1/services/search", wantErr: "loop"},
-		"explicit 443":     {next: "https://api.inflowpay.ai:443/v1/services/search", wantErr: "loop"},
+		"carries userinfo": {next: "https://user@directory.offeringprotocol.org/v1", wantErr: "canonical origin"},
+		"alternating case": {next: "https://DIRECTORY.OFFERINGPROTOCOL.ORG/v1/services/search", wantErr: "loop"},
+		"explicit 443":     {next: "https://directory.offeringprotocol.org:443/v1/services/search", wantErr: "loop"},
 	}
 	for name, test := range cases {
 		client := serve(t, func(*http.Request) (*http.Response, error) {
@@ -215,7 +215,7 @@ func TestContinuationsMustAdvanceAndStayOnOrigin(t *testing.T) {
 	client := serve(t, func(*http.Request) (*http.Response, error) {
 		page++
 		if page == 1 {
-			return response(http.StatusOK, `{"items":[`+record+`],"next":"https://API.INFLOWPAY.AI:443/v1/services/search?cursor=c"}`, nil), nil
+			return response(http.StatusOK, `{"items":[`+record+`],"next":"https://DIRECTORY.OFFERINGPROTOCOL.ORG:443/v1/services/search?cursor=c"}`, nil), nil
 		}
 		return response(http.StatusOK, `{"items":[`+record+`]}`, nil), nil
 	})

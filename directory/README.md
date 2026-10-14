@@ -4,7 +4,7 @@ Package `directory` searches indexed Services and Collections from ODP and OpenA
 not crawl catalogs or index Offerings. Each mixed result identifies its exact discovery document.
 The Agent package navigates ODP catalogs only; it does not execute OpenAPI operations.
 
-The production origin is fixed at `https://api.inflowpay.ai`. Select `Sandbox` to use
+The production origin is fixed at `https://directory.offeringprotocol.org`. Select `Sandbox` to use
 the fixed `https://sandbox.inflowpay.ai` environment. Callers cannot configure another
 origin.
 

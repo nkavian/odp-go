@@ -110,7 +110,7 @@ func TestRedirectsAreBoundedAndOriginLocked(t *testing.T) {
 		"absent Location":  {location: "", wantErr: "omitted Location"},
 		"another origin":   {location: "https://evil.example/v1", wantErr: "changed origin"},
 		"scheme relative":  {location: "//evil.example/v1", wantErr: "changed origin"},
-		"carries userinfo": {location: "https://user@api.inflowpay.ai/v1", wantErr: "changed origin"},
+		"carries userinfo": {location: "https://user@directory.offeringprotocol.org/v1", wantErr: "changed origin"},
 		"endless":          {location: "/v1/again", wantErr: "redirect limit"},
 	}
 	for name, test := range cases {

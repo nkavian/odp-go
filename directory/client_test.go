@@ -92,7 +92,7 @@ func TestSearchPagesUsesCanonicalOriginAndStructuredFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if target != "https://api.inflowpay.ai/v1/services/search" {
+	if target != "https://directory.offeringprotocol.org/v1/services/search" {
 		t.Fatalf("target = %q", target)
 	}
 	if method != http.MethodPost {

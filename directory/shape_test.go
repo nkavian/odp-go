@@ -66,9 +66,9 @@ func TestContinuationsAreCheckedBeforeTheyAreFollowed(t *testing.T) {
 		wantErr string
 	}{
 		"unparseable":  {next: "https://[::1/v1/services/search", wantErr: "parse Directory continuation"},
-		"another port": {next: "https://api.inflowpay.ai:8443/v1/services/search", wantErr: "canonical origin"},
-		"default port": {next: "HTTPS://API.inflowpay.ai:443/v1/services/search", wantErr: ""},
-		"userinfo":     {next: "https://user@api.inflowpay.ai/v1/services/search", wantErr: "canonical origin"},
+		"another port": {next: "https://directory.offeringprotocol.org:8443/v1/services/search", wantErr: "canonical origin"},
+		"default port": {next: "HTTPS://DIRECTORY.offeringprotocol.org:443/v1/services/search", wantErr: ""},
+		"userinfo":     {next: "https://user@directory.offeringprotocol.org/v1/services/search", wantErr: "canonical origin"},
 	}
 	for name, test := range cases {
 		pages := 0
