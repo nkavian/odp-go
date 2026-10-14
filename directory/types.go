@@ -19,7 +19,7 @@ const (
 )
 
 const (
-	productionOrigin = "https://api.inflowpay.ai"
+	productionOrigin = "https://directory.offeringprotocol.org"
 	sandboxOrigin    = "https://sandbox.inflowpay.ai"
 )
 

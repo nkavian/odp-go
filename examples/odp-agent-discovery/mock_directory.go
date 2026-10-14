@@ -103,7 +103,7 @@ func createMockDirectory(ctx context.Context, candidates []string) (*mockDirecto
 		return nil, err
 	}
 	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		if request.Method != http.MethodPost || request.URL.Host != "api.inflowpay.ai" || request.URL.Scheme != "https" {
+		if request.Method != http.MethodPost || request.URL.Host != "directory.offeringprotocol.org" || request.URL.Scheme != "https" {
 			return nil, errors.New("mock directory received an unsupported request")
 		}
 		responseBody := body
